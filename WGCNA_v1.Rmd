@@ -1,0 +1,678 @@
+---
+title: "WGCNA_aphal"
+author: "Livia Songster"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    theme: flatly
+    self_contained: true
+    toc: true
+    toc_float: true
+---
+```{r, import packages, message = FALSE}
+# load necessary packages
+library(BiocManager)
+library(DESeq2)
+library(tximport)
+library(vsn)
+library(ggplot2)
+library(dplyr)
+library(doBy)
+library(rmarkdown)
+library(pheatmap)
+library(RColorBrewer)
+library(WGCNA)
+library(pathview)
+library("AnnotationDbi")
+library(clusterProfiler)
+library(largeList)
+library(goseq)
+library(scales)
+```
+
+
+```{r prepare data}
+dir <- getwd()
+
+# Define the file path to the plots directory
+subDir <- paste0(dir,"/Output_WGCNA_",Sys.Date())
+
+plots_dir <- paste0(subDir,"/WGCNA_Plots")
+results_dir <- paste0(subDir,"/WGCNA_Results")
+go_results_dir <- paste0(subDir,"/GO_Results")
+
+
+dir.create(path=subDir, showWarnings = FALSE)
+dir.create(plots_dir, showWarnings = FALSE)
+dir.create(results_dir, showWarnings = FALSE)
+dir.create(go_results_dir, showWarnings = FALSE)
+
+
+# read in metadata with filenames
+metadata <- readxl::read_xlsx("C:/Users/livia/Documents/02-drott-lab-files/leaderless_Aphalloides/metadata.xlsx",sheet="metadata")
+
+# print out in rmarkdown
+paged_table(metadata[,c("Sample_ID","Population","Collection_site","Maturity")])
+
+# set factor orders
+metadata$Origin <- factor(metadata$Origin, levels = c("EU", "CA"))
+
+metadata$Population <- factor(metadata$Population, levels = c("Drake",
+                                                            "Pet",
+                                                            "Picnic",
+                                                            "Aso",
+                                                            "Champ",
+                                                            "Doc",
+                                                            "Gron",
+                                                            "Lamp",
+                                                            "Quill",
+                                                            "Tisza"))
+                          
+metadata$Collection_site <- factor(metadata$Collection_site, levels =c("PRNS CA",
+                                                       "TBSP CA",
+                                                       "Csongrad HUNGARY",
+                                                       "Champenoux FRANCE",
+                                                       "Occitanie FRANCE",
+                                                       "Aude FRANCE",
+                                                       "Ostfold NORWAY"))
+
+
+# make sure all files are present
+all(file.exists(metadata$Count_file))
+
+# if necessary - subset to only include samples where the file exists
+metadata <- metadata[file.exists(metadata$Count_file),]
+
+# exclude pet5 (low mapping rate, 4%) and pet1-redo
+metadata <- metadata[!metadata$Sample_ID %in% c("Pet1-redo","Pet5"),]
+# import data - first get file names
+files <- metadata$Count_file
+
+# associate those with sample ID
+names(files) <- paste(metadata$Sample_ID)
+
+# import the featurecounts files
+import_counts <- function(file_name) {
+  # first line is for debugging
+  # file_name = files[1]
+  # extract sample prefix
+  File_prefix <- unlist(strsplit(file_name,"/"))[8]
+  
+  temp <- readr::read_tsv(file_name,comment="#",show_col_types = FALSE)
+  # rename column to File_prefix
+  colnames(temp)[7] <- File_prefix
+  # output the column of counts
+  output <- as.data.frame(temp[,7])
+  rownames(output) <- temp$Geneid
+  return(output)
+}
+
+# now run import_counts and cbind results together for all filenames in files
+output_list <- lapply(files, import_counts)
+
+# bind them together
+cts <- as.matrix(do.call(cbind, output_list))
+
+head(cts,2)
+
+# clean up the rownames and column names
+row.names(cts) <- gsub("^[^-]+-|\\.m01$", "", row.names(cts))
+colnames(cts) <- metadata$Sample_ID
+head(cts,2)
+
+
+# check that the row order of metadata and column order of cts match
+
+coldata <- as.data.frame(metadata[,c("Origin","Population")])
+rownames(coldata) <- metadata$Sample_ID
+
+coldata$Origin <- factor(coldata$Origin)
+coldata$Population <- factor(coldata$Population)
+
+coldata
+
+all(rownames(coldata) %in% colnames(cts))
+all(rownames(coldata) == colnames(cts))
+
+# both of these are true!
+# in case one of these was false, use the following logic:
+cts <- cts[, rownames(coldata)]
+all(rownames(coldata) == colnames(cts))
+
+# finally - generate dds object
+dds <- DESeqDataSetFromMatrix(countData = cts,
+                              colData = coldata,
+                              design = ~ Origin)
+dds
+
+# remove low-count genes that have a mean count below 20
+keep <- rowMeans(counts(dds)) >= 20
+
+# find percentage of genes that have been kept after applying filter for low counts
+print(c("There are this many genes total:",length(dds)))
+print(c("There are this many genes with mean count below 20:",length(dds)-sum(keep)))
+print(c("Percentage of genes with mean count ABOVE 20:",sum(keep) / length(dds) * 100))
+
+# now remove the low-count genes
+dds <- dds[keep,]
+
+# run DESeq
+dds <- DESeq(dds)
+
+# variance-stabilizing transformation of the data
+# vsd <- vst(dds, blind = FALSE) 
+rld <- rlog(dds, blind = FALSE)
+
+# plot the stabilization
+msd_dds <- meanSdPlot(assay(dds))
+# msd_vsd <- meanSdPlot(assay(vsd))
+msd_rld <- meanSdPlot(assay(rld))
+
+
+msd_dds$gg + ggtitle("Untransformed data") + ylim(-1,100)
+# msd_vsd$gg + ggtitle("Variance stabilized transformation")
+msd_rld$gg + ggtitle("Regularized-logarithm transformation")
+
+# Retrieve the normalized data from the `DESeqDataSet` & transpose
+# THIS IS FOR WGCNA ANALYSIS!!!
+normalized_counts <- t(assay(rld))
+```
+
+Start WGCNA
+Useful tutorial: https://alexslemonade.github.io/refinebio-examples/04-advanced-topics/network-analysis_rnaseq_01_wgcna.html 
+```{r Pick soft threshhold}
+# install WGCNA:
+# BiocManager::install("preprocessCore")
+# BiocManager::install("WGCNA")
+
+# Determine parameters for WGCNA
+# The choice of power parameter will affect the number of modules identified
+# Use pickSoftThreshold() function to help identify good choices for this parameter.
+
+sft <- pickSoftThreshold(normalized_counts,
+  dataIsExpr = TRUE,
+  corFnc = cor,
+  networkType = "signed"
+)
+
+# prepare dataframe so we can plot it:
+# calculate a measure of the model fit, the signed R2, and make that a new variable.
+sft_df <- data.frame(sft$fitIndices) %>%
+  dplyr::mutate(model_fit = -sign(slope) * SFT.R.sq)
+
+# plot it
+ggplot(sft_df, aes(x = Power, y = model_fit, label = Power)) +
+  # Plot the points
+  geom_point() +
+  # We'll put the Power labels slightly above the data points
+  geom_text(nudge_y = 0.1) +
+  # We will plot what WGCNA recommends as an R^2 cutoff
+  geom_hline(yintercept = 0.80, col = "red") +
+  # Just in case our values are low, we want to make sure we can still see the 0.80 level
+  ylim(c(min(sft_df$model_fit), 1.05)) +
+  # We can add more sensible labels for our axis
+  xlab("Soft Threshold (power)") +
+  ylab("Scale Free Topology Model Fit, signed R^2") +
+  ggtitle("Scale independence") +
+  # This adds some nicer aesthetics to our plot
+  theme_classic()
+
+ggsave(filename = file.path(plots_dir, "WGCNA_Scale-Free_Model_fit.png"),
+    plot = last_plot(),
+    width = 5,
+    height = 5,
+    units = "in",
+    dpi = 300)
+
+# WGCNA’s authors recommend using a power that has an signed R2 above 0.80
+# otherwise they warn your results may be too noisy to be meaningful.
+# If you have multiple power values with signed R2 above 0.80, then picking the one at an inflection point
+# in other words where the R2 values seem to have reached their saturation (Zhang and Horvath 2005)
+# You want to a power that gives you a big enough R2 but is not excessively large.
+
+# also plot mean connectivity
+
+ggplot(sft_df, aes(x = Power, y = mean.k., label = Power)) +
+  # Plot the points
+  geom_point() +
+  # We'll put the Power labels slightly above the data points
+  geom_text(nudge_y = 200) +
+  # We can add more sensible labels for our axis
+  xlab("Soft Threshold (power)") +
+  ylab("Mean Connectivity") +
+  ggtitle("Mean Connectivity") +
+  # This adds some nicer aesthetics to our plot
+  theme_classic()
+
+ggsave(filename = file.path(plots_dir, "WGCNA_Scale-Free_Model_connectivity.png"),
+    plot = last_plot(),
+    width = 5,
+    height = 5,
+    units = "in",
+    dpi = 300)
+
+```
+
+
+
+```{r run WGCNA}
+# I will use a power of 14
+softPower = 14
+
+# bwnet <- blockwiseModules(normalized_counts,
+#   maxBlockSize = 20000, # What size chunks (how many genes) the calculations should be run in
+#   TOMType = "signed", # topological overlap matrix
+#   networkType = "signed", # signed netwok
+#   power = softPower, # soft threshold for network construction
+#   numericLabels = TRUE, # Let's use numbers instead of colors for module labels
+#   randomSeed = 1234, # there's some randomness associated with this calculation
+#   # so we should set a seed
+# )
+# 
+# 
+# # this took 7min to run
+# # so we will save it and then re-import it next time to save time
+# 
+# # write results to a file
+# readr::write_rds(bwnet,
+#   file = file.path(results_dir, "wgcna_results.RDS")
+# )
+
+# import file
+bwnet <- readRDS(file = file.path(results_dir, "wgcna_results.RDS"))
+```
+
+# Explore the WGCNA results
+
+Generate dendrogram with module names
+
+```{r blockwise module dendrogram}
+# Convert labels to colors for plotting
+dynamicColors = labels2colors(bwnet$colors)
+
+# Plot the dendrogram and the module colors underneath
+# save as an image
+sizeGrWindow(12, 9)
+pdf(file = file.path(plots_dir, "WGCNA_module_gene_dendrogram.pdf"), wi = 9, he = 6)
+
+plotDendroAndColors(bwnet$dendrograms[[1]],
+                    dynamicColors,
+                    "Dynamic Tree Cut",
+                    dendroLabels = FALSE, hang = 0.03,
+                    addGuide = TRUE, guideHang = 0.05)
+dev.off()  
+
+# map color to module name:
+# merge the colors with the labels in a new df
+mergedlabels = as.data.frame(cbind(bwnet$colors,dynamicColors))
+# make rownames a new column
+mergedlabels$gene <- rownames(mergedlabels)
+colnames(mergedlabels)[1] <- "module_name"
+rownames(mergedlabels)<-NULL
+# remove redundant entries
+mergedlabels = unique(mergedlabels)
+
+# list out the modules and their gene set sizes
+module_sizes = as.data.frame(table(bwnet$colors))
+colnames(module_sizes) <- c("module_name","number_genes")
+# merge in color info
+mergedlabels = merge(mergedlabels, module_sizes,by="module_name")
+color_name_key <- unique(mergedlabels[,c("module_name","dynamicColors")])
+module_sizes <- merge(module_sizes,color_name_key,by="module_name")
+
+# sort module_sizes
+module_sizes2 <- module_sizes[order(module_sizes$module_name), ]
+module_sizes2$dynamicColors <- paste0("ME",module_sizes2$dynamicColors)
+
+# paged_table(mergedlabels)
+write.csv(mergedlabels,file.path(results_dir, "WGCNA_module_all_genes.csv"),row.names=FALSE)
+write.csv(module_sizes,file.path(results_dir, "WGCNA_module_color_size_key.csv"),row.names=FALSE)
+
+
+```
+
+
+Make module expression plots
+```{r Explore Results - Make module expression plots}
+# peak at eigengenes
+module_eigengenes <- bwnet$MEs
+
+# Print out a preview
+head(module_eigengenes)
+
+# Which modules have biggest differences across treatment groups?
+# first make sure all samples are in order
+all.equal(metadata$Sample_ID, rownames(module_eigengenes))
+
+# Create the design matrix from the `Population` variable
+des_mat <- model.matrix(~ metadata$Population)
+
+# Run linear model on each module. Limma wants our tests to be per row, so we also need to transpose so the eigengenes are rows
+
+# lmFit() needs a transposed version of the matrix
+fit <- limma::lmFit(t(module_eigengenes), design = des_mat)
+
+# Apply empirical Bayes to smooth standard errors
+fit <- limma::eBayes(fit)
+
+# Apply multiple testing correction and obtain stats
+stats_df <- limma::topTable(fit, number = ncol(module_eigengenes)) %>%
+  tibble::rownames_to_column("module")
+
+head(stats_df)
+
+# save as csv
+write.csv(stats_df, file.path(results_dir,"WGCNA_module_statistics.csv"),row.names=FALSE)
+
+# make a plot of module 0
+module_df <- module_eigengenes %>%
+  tibble::rownames_to_column("Sample_ID")
+
+# add in the group from metadata
+module_df$Population <- metadata$Population
+
+# write a function to generate a plot for each module
+make_module_expr_plot <- function(module_name, data = module_df) {
+  # subset module data for module of interest
+  module_df_plot = module_df[,c(module_name,"Population")]
+  
+  module_df_plot$Population <- factor(module_df_plot$Population, levels = c("Drake",
+                                                            "Pet",
+                                                            "Picnic",
+                                                            "Aso",
+                                                            "Champ",
+                                                            "Doc",
+                                                            "Gron",
+                                                            "Lamp",
+                                                            "Quill",
+                                                            "Tisza"))
+# first 3 are CA, last 7 are EU
+genotype_colors <- c("#74121D","#af2930","#FE4A49",
+                     "#03045e","#023e8a","#0077b6","#0096c7","#00b4d8","#48cae4","#90e0ef")
+  
+  colnames(module_df_plot)[1] <- "Expression"
+  # a holds summary stats for error bars;
+  a <- summaryBy(Expression ~ Population, module_df_plot, FUN = c(mean, sd, plotrix::std.error))
+  colnames(a) <- c("Population","Expression.mean","Expression.sd","Expression.std.error")
+  # plot it:
+  ggplot(module_df_plot, aes(x = Population, y = Expression, color = Population)) +
+    geom_jitter(size=5, position = position_jitter(w = 0.1, h = 0)) +
+    geom_errorbar(data = a,
+                mapping = aes(x = Population,
+                              y = Expression.mean,
+                              ymin = Expression.mean - Expression.std.error,
+                              ymax = Expression.mean + Expression.std.error),
+                              size=1,width=.2,color="black")+
+    geom_point(data = a, mapping = aes(x = Population, y = Expression.mean),
+      size=12, color="black",  shape="-") +
+      scale_color_manual(values = genotype_colors) +
+    ggtitle(paste0("Mean expression of module ",module_name)) +  theme_classic()
+  
+  # save the plot in the plots folder
+  ggsave(filename = file.path(plots_dir, paste0("WGCNA_expression_",module_name,".png")),
+    plot = last_plot(),
+    width = 6,
+    height = 5,
+    units = "in",
+    dpi = 300)
+}
+
+# get list of modules
+list <- unique(stats_df$module)
+
+# identify which genes are in each module
+gene_module_key <- tibble::enframe(bwnet$colors, name = "gene", value = "module") %>%
+  # Let's add the `ME` part so its more clear what these numbers are and it matches elsewhere
+  dplyr::mutate(module = paste0("ME", module))
+
+write.csv(gene_module_key, file.path(results_dir,paste0("WGCNA_module_genelist_allmodules.csv")),row.names=FALSE)
+
+# loop through module list
+for(i in 1:length(list)) {
+  name = list[i]
+  # make a plot
+  make_module_expr_plot(module_name=name)
+  # print out list of genes from each module into a file
+  module_data <- gene_module_key %>%
+    dplyr::filter(module == name)
+
+  write.csv(module_data, file.path(results_dir,paste0("WGCNA_module_genelist_",name,".csv")),row.names=FALSE)
+}
+
+
+
+```
+
+Plot heatmaps for each module
+
+```{r module heatmaps}
+
+make_module_heatmap <- function(module_name,
+                                expression_mat = normalized_counts,
+                                metadata_df = metadata,
+                                gene_module_key_df = gene_module_key,
+                                module_eigengenes_df = module_eigengenes) {
+  # Create a summary heatmap of a given module.
+  #
+  # Args:
+  # module_name: a character indicating what module should be plotted, e.g. "ME19"
+  # expression_mat: The full gene expression matrix. Default is `normalized_counts`.
+  # metadata_df: a data frame with Sample_ID and time_point
+  #              as columns. Default is `metadata`.
+  # gene_module_key: a data.frame indicating what genes are a part of what modules. Default is `gene_module_key`.
+  # module_eigengenes: a sample x eigengene data.frame with samples as row names. Default is `module_eigengenes`.
+  #
+  # Returns:
+  # A heatmap of expression matrix for a module's genes, with a barplot of the
+  # eigengene expression for that module.
+
+  # Set up the module eigengene with its Sample_ID
+  module_eigengene <- module_eigengenes_df %>%
+    dplyr::select(all_of(module_name)) %>%
+    tibble::rownames_to_column("Sample_ID")
+
+  # Set up column annotation from metadata
+  col_annot_df <- metadata_df %>%
+    # Only select specific columns
+    dplyr::select(Sample_ID, Population, Replicate) %>%
+    # Add on the eigengene expression by joining with sample IDs
+    dplyr::inner_join(module_eigengene, by = "Sample_ID") %>%
+    # Arrange by Population and replicate
+    dplyr::arrange(Population, Replicate) %>%
+    # Store sample
+    tibble::column_to_rownames("Sample_ID")
+
+  # Create the ComplexHeatmap column annotation object
+  col_annot <- ComplexHeatmap::HeatmapAnnotation(
+    # Supply treatment labels
+    Population = col_annot_df$Population,
+    # Add annotation barplot
+    module_eigengene = ComplexHeatmap::anno_barplot(dplyr::select(col_annot_df, module_name)),
+    # Pick colors for each experimental Population in time_point
+    col = list(Population = c(
+      "Drake" = "#74121D",
+      "Pet" = "#af2930",
+      "Picnic" = "#FE4A49",
+      "Aso" = "#03045e",
+      "Champ" = "#023e8a",
+      "Doc" = "#0077b6",
+      "Gron" = "#0096c7",
+      "Lamp" = "#00b4d8",
+      "Quill" = "#48cae4",
+      "Tisza" = "#90e0ef"
+    ))
+  )
+  
+  # Get a vector of the gene IDs that correspond to this module
+  module_genes <- gene_module_key_df %>%
+    dplyr::filter(module == module_name) %>%
+    dplyr::pull(gene)
+
+  # Set up the gene expression data frame
+  mod_mat <- expression_mat %>%
+    t() %>%
+    as.data.frame() %>%
+    # Only keep genes from this module
+    dplyr::filter(rownames(.) %in% module_genes) %>%
+    # Order the samples to match col_annot_df
+    dplyr::select(rownames(col_annot_df)) %>%
+    # Data needs to be a matrix
+    as.matrix()
+
+  # Normalize the gene expression values
+  mod_mat <- mod_mat %>%
+    # Scale can work on matrices, but it does it by column so we will need to
+    # transpose first
+    t() %>%
+    scale() %>%
+    # And now we need to transpose back
+    t()
+
+  # Create a color function based on standardized scale
+  color_func <- circlize::colorRamp2(
+    c(-2, 0, 2),
+    c("#67a9cf", "#f7f7f7", "#ef8a62")
+  )
+  
+  # cluster data within each Population
+  # first find order of group from the matrix
+  group_order = colnames(mod_mat)
+  # find group from col_annot_df 
+  group_order = col_annot_df[group_order,1]
+  dend = ComplexHeatmap::cluster_within_group(mod_mat, group_order)
+
+  # Plot on a heatmap
+  heatmap <- ComplexHeatmap::Heatmap(mod_mat,
+    name = module_name,
+    # Supply color function
+    col = color_func,
+    # Supply column annotation
+    bottom_annotation = col_annot,
+    # We want to cluster samples within groups
+    cluster_columns = dend,
+    # We don't need to show sample or gene labels
+    show_row_names = FALSE,
+    show_column_names = FALSE
+  )
+
+  # Return heatmap
+  return(heatmap)
+}
+
+# loop through module list
+for(i in 1:length(list)) {
+  # initiate savefile
+  png(file.path(plots_dir, paste0("WGCNA_gene_heatmap_",list[i],".png")),width=6,height=5,units="in",res=1200)
+  # make a heatmap
+  heatmap = make_module_heatmap(module_name=list[i])
+  ComplexHeatmap::draw(heatmap)
+  dev.off()  
+  
+}
+
+
+```
+
+# Phenotype correlation
+Reference: https://rstudio-pubs-static.s3.amazonaws.com/687551_ed469310d8ea4652991a2e850b0018de.html
+
+```{r module to phenotype correlation}
+#Read phenotypic data
+traitData1 = read.csv("phenoTraits.csv")
+# remove the second columns which has country info
+traitData = traitData1[,c(1,3)]
+#dim(traitData)
+#names(traitData)
+Samples = rownames(normalized_counts)
+# reorder rows to match
+traitRows = match(Samples, traitData$Sample_ID)
+
+datTraits = as.data.frame(traitData[traitRows, -1])
+rownames(datTraits) = traitData[traitRows, 1]
+names(datTraits) <- "Maturity"
+
+collectGarbage()
+
+#Regrouping samples
+sampleTree2 = hclust(dist(normalized_counts), method = "average")
+
+#Converting phenotypic characters in a color representation: white means low value, red means high value
+#and gray missing value
+traitColors = numbers2colors(datTraits, signed = FALSE)
+
+#Plot a sample dendogram with the colors below
+sizeGrWindow(12, 9)
+pdf(file = file.path(plots_dir, "WGCNA_module_traits_dendrogram.pdf"), wi = 9, he = 6)
+
+plotDendroAndColors(sampleTree2, traitColors,
+                    groupLabels = names(datTraits), 
+                    main = "Sample dendrogram and trait heatmap")
+dev.off()
+
+
+#Relating modules to characteristics and identifying important genes
+#Defining the number of genes and samples
+nGenes = ncol(normalized_counts)
+nSamples = nrow(normalized_counts)
+
+#Recalculating MEs with label colors from blockwise analysis, dynamicColors
+MEs0 = moduleEigengenes(normalized_counts, dynamicColors)$eigengenes
+
+MEs <- MEs0[,module_sizes2$dynamicColors]
+#MEs = orderMEs(MEs0)
+moduleTraitCor = cor(MEs, datTraits, use = "p")
+moduleTraitPvalue = corPvalueStudent(moduleTraitCor, nSamples)
+
+#sizeGrWindow(8,4)
+
+#Displaying correlations and its p-values
+textMatrix =  paste(signif(moduleTraitCor, 2), "\n(",
+                    signif(moduleTraitPvalue, 1), ")", sep = "")
+dim(textMatrix) = dim(moduleTraitCor)
+# par(mar = c(6, 8.5, 3, 3))
+#Displaying the correlation values in a heatmap plot
+sizeGrWindow(5, 5)
+pdf(file = file.path(plots_dir, "WGCNA_module_traits_heatmap.pdf"), wi = 8, he = 8)
+
+
+labeledHeatmap(Matrix = moduleTraitCor,
+               xLabels = names(datTraits),
+               yLabels = names(MEs),
+               ySymbols = names(MEs),
+               colorLabels = FALSE,
+               colors = blueWhiteRed(50),
+               textMatrix = textMatrix,
+               setStdMargins = FALSE,
+               cex.text = 0.5,
+               zlim = c(-1,1),
+               main = paste("Module-trait relationships"))
+dev.off()
+
+
+```
+
+identify which modules contain msdins
+
+```{r}
+# read in new msdin list from Mickey
+msdins <- readr::read_tsv("C:/Users/livia/Documents/02-drott-lab-files/aphalloides_reff/reff/cds_for_liv.bed", comment = "#", col_names = FALSE,show_col_types = FALSE)
+
+msdins <- msdins$X4
+
+# find modules
+msdin_modules <- subset(mergedlabels, gene %in% msdins)
+paged_table(msdin_modules)
+
+
+# plot module membership for grey, turqoise, blue, red
+
+
+
+
+```
+
+
+```{r session info}
+# Print session info
+sessioninfo::session_info()
+```
