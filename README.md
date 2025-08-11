@@ -2,7 +2,9 @@
 Code related to data analysis and figure generation is below.
 
 Contents:
-- Script 1 [Add MSDINs to .gff3 gene annotation file](https://github.com/LiviaSongster/leaderless_Aphalloides/blob/main/Script1_gff.html)
-- Script 2 [Read mapping with Hisat2 and Featurecounts](https://github.com/LiviaSongster/leaderless_Aphalloides/blob/main/Script2_RNAseq_genome_mapping.html)
-- Script 3 [Differential expression analysis with DESeq2](https://github.com/LiviaSongster/leaderless_Aphalloides/blob/main/Script3_DESeq2.html)
-- Script 4 [BAM alignment of reads to a leaderless MSDIN gene](https://github.com/LiviaSongster/leaderless_Aphalloides/blob/main/Script4_leaderless_bam_alignment.html)
+- Script 1 [Add MSDINs to .gff3 gene annotation file](https://github.com/LiviaSongster/leaderless_Aphalloides/blob/main/Script1_gff.md)
+- Script 2 [Read mapping with Hisat2 and Featurecounts](https://github.com/LiviaSongster/leaderless_Aphalloides/blob/main/Script2_RNAseq_genome_mapping.md)
+- Script 3 [Differential expression analysis with DESeq2](https://github.com/LiviaSongster/leaderless_Aphalloides/blob/main/Script3_DESeq2.md)
+- Script 4 [BAM alignment of reads to a leaderless MSDIN gene](https://github.com/LiviaSongster/leaderless_Aphalloides/blob/main/Script4_leaderless_bam_alignment.md)
+- Genome annotation file of canonical and noncanonical MSDINs in A. phalloides reference genome 10511 [.bed](https://github.com/LiviaSongster/leaderless_Aphalloides/blob/main/cds_for_liv.bed)
+- Genome annotation file of canonical and noncanonical MSDINs in A. phalloides reference genome 10511 [.gff3](https://github.com/LiviaSongster/leaderless_Aphalloides/blob/main/aphal_msdins_only.gff3)
