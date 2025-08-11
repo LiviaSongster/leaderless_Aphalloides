@@ -1,5 +1,5 @@
 # RNA sequence analysis of leaderless MSDINs in A. phalloides.
-Code related to data analysis and figure generation is below.
+Code related to data analysis and figure generation is below. Hyperlinks will connect to .md markdown files that are rendered in Github. For proper rendering & easier reviewing on your own computer, I recommend you download the .html files locally and open them in your .html viewer/browser.
 
 Contents:
 - Script 1 [Add MSDINs to .gff3 gene annotation file](https://github.com/LiviaSongster/leaderless_Aphalloides/blob/main/Script1_gff.md)
