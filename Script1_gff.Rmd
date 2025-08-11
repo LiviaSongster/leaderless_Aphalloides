@@ -1,0 +1,266 @@
+---
+title: "Script1_add_msdins_to_genome_annotation_gff"
+author: "Livia Oster"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+#### Edit gff to add MSDINs
+
+I added the leadered and leaderless MSDINs / RiPPs from the .bed file to the gene annotation .gff3 file. Note that there are no UTRs annotated in the modified gff.
+
+```{r add_msdins_gff}
+# disable scientific notation in R
+# this is important because otherwise some chr locations will export in sci notation
+# which can break packages like e.g. featurecounts
+options(scipen = 999)
+library(readr)
+library(dplyr)
+
+# Read the GFF file (GFF files are tab-delimited)
+gff_data <- read_tsv("/Volumes/Liv/Lab_projects/Amanita_phalloides/aphalloides_reff/reff/t_5cc30df297ef2-5e76fa469d2f4-pasa_refine.gensas.gff3/t_5cc30df297ef2-5e76fa469d2f4-pasa_refine.gensas.gff3", comment = "#", col_names = FALSE,show_col_types = FALSE)
+
+# read in new msdin list from Mickey
+msdins <- read_tsv("/Volumes/Liv/Lab_projects/Amanita_phalloides/aphalloides_reff/reff/cds_for_liv.bed", comment = "#", col_names = FALSE,show_col_types = FALSE)
+
+rmarkdown::paged_table(msdins, options = NULL)
+# read in key for renaming chromosomes
+key <- read_tsv("/Volumes/Liv/Lab_projects/Amanita_phalloides/aphalloides_reff/reff/10511_Aphal_PT_AllpathsLG.LINKS.jelly.pilon_chrm_name_key", comment = "#", col_names = FALSE,show_col_types = FALSE)
+
+# Remove '>' from all elements in the key dataframe
+key[] <- lapply(key, function(x) gsub(">", "", x))
+colnames(key) <- c("new_name","old_name")
+# rename the chromosomes in the msdins dataframe
+msdins <- msdins %>%
+  left_join(key, by = c("X1" = "old_name")) %>%
+  mutate(X1 = ifelse(is.na(new_name), X1, new_name)) %>%
+  dplyr::select(-new_name)
+
+
+# Add a unique number to duplicate values in column V4
+# msdins$X4 <- make.unique(msdins$X4, sep = "_")
+
+# find exon and intron info from original .bed files
+leaderless <- read_tsv("/Volumes/Liv/Lab_projects/Amanita_phalloides/aphalloides_reff/reff/leaderless/processed_best_msdin_final.bed", col_names = FALSE,show_col_types = FALSE)
+
+leadered <- read_tsv("/Volumes/Liv/Lab_projects/Amanita_phalloides/aphalloides_reff/reff/leadered/processed_best_msdin_final.bed", col_names = FALSE,show_col_types = FALSE)
+
+# peek at the files
+rmarkdown::paged_table(leaderless, options = NULL)
+rmarkdown::paged_table(leadered, options = NULL)
+
+# rename chr for these
+leaderless <- leaderless %>%
+  left_join(key, by = c("X1" = "old_name")) %>%
+  mutate(X1 = ifelse(is.na(new_name), X1, new_name)) %>%
+  dplyr::select(-new_name)
+
+leadered <- leadered %>%
+  left_join(key, by = c("X1" = "old_name")) %>%
+  mutate(X1 = ifelse(is.na(new_name), X1, new_name)) %>%
+  dplyr::select(-new_name)
+
+
+# identify which msdins are which between the bed files
+find_msdin_name <- function(query,chr) {
+  # for a given query sequence, check which chromosome
+  #query = leadered$X2[4]
+  #chr = leadered$X1[4]
+  # then find the pair of values it is between
+  query = as.numeric(query)
+  temp <- msdins[msdins$X1==chr,]
+  
+  # if temp is not length 0, proceed, else end
+  if (nrow(temp) > 0 ) {
+    # make sure everything is numeric
+    temp$X2 <- as.numeric(temp$X2)
+    temp$X3 <- as.numeric(temp$X3)
+  
+    # output the name of the MSDIN
+    result <- temp %>%
+    filter(query >= X2 & query <= X3) %>%
+    pull(X4)
+  
+    return(result)
+  } else {
+    return("NA")
+  }
+  
+}
+
+# get msdin names
+leaderless$name <- mapply(find_msdin_name, leaderless$X2, leaderless$X1)
+leadered$name <- mapply(find_msdin_name, leadered$X2, leadered$X1)
+
+# extract info from column X4 which has attribute type and whole gene positions
+# want to keep values 1 and 12
+leadered[,c("attr","pos")] <- data.frame(do.call("rbind", strsplit(as.character(leadered$X4), "_",
+                                     fixed = TRUE)))[,c(1,12)]
+
+leaderless[,c("attr","pos")] <- data.frame(do.call("rbind", strsplit(as.character(leaderless$X4), "_",
+                                     fixed = TRUE)))[,c(1,12)]
+
+# extract de-duplicated gene position info
+gene_data <- data.frame(do.call("rbind", strsplit(as.character(leaderless$pos), ":",
+                                     fixed = TRUE)))
+gene_data[,2:3] <- data.frame(do.call("rbind", strsplit(as.character(gene_data$X2), "(",
+                                     fixed = TRUE)))
+# remove other )
+gene_data[] <- lapply(gene_data, function(x) gsub(")", "", x))
+
+gene_data[,4:5] <- data.frame(do.call("rbind", strsplit(as.character(gene_data$X2), "-",
+                                     fixed = TRUE)))
+
+# add names and remove dups
+gene_data$name <- leaderless$name
+gene_data$chr <- leaderless$X1
+gene_data <- gene_data[,c("name","chr","X1.1","X2.2","X2.1")]
+gene_data <- unique(gene_data)
+
+# repeat for leadered
+gene_data2 <- data.frame(do.call("rbind", strsplit(as.character(leadered$pos), ":",
+                                     fixed = TRUE)))
+gene_data2[,2:3] <- data.frame(do.call("rbind", strsplit(as.character(gene_data2$X2), "(",
+                                     fixed = TRUE)))
+# remove other )
+gene_data2[] <- lapply(gene_data2, function(x) gsub(")", "", x))
+
+gene_data2[,4:5] <- data.frame(do.call("rbind", strsplit(as.character(gene_data2$X2), "-",
+                                     fixed = TRUE)))
+
+# add names and remove dups
+gene_data2$name <- leadered$name
+gene_data2$chr <- leadered$X1
+gene_data2 <- gene_data2[,c("name","chr","X1.1","X2.2","X2.1")]
+gene_data2 <- unique(gene_data2)
+
+# merge together
+gene_data_all <- rbind(gene_data,gene_data2) 
+
+# remove samples where name is not in msdins
+gene_data_all <- subset(gene_data_all, name %in% msdins$X4)
+
+# Ensure both data frames are sorted based on the "name" column
+gene_data_all$name <- as.character(gene_data_all$name)
+gene_data_all <- gene_data_all[order(gene_data_all$name), ]
+msdins <- msdins[order(msdins$X4), ]
+
+# example of old bed file
+# Contig0	19703	19843	MYNPPYFLPP	N/A	-	3	MYNPPYFLPPCVSDDIEMVLTRGESLC*
+
+# example of GFF file
+# Contig0	5e757d1f96d78-evm	CDS	11712	11935	.	+	0	ID=26557-Ap.00g000010.m01.CDS01;Name=26557-Ap.00g000010.m01.CDS01;Parent=26557-Ap.00g000010.m01;original_ID=cds.Ap.00g000010.m01;Alias=cds.Ap.00g000010.m01;
+
+# types of attributes
+unique(gff_data$X3)
+# each exon needs to be saved as an exon and a CDS in the gff file
+# so I need to generate a unique file for each of these with the correct chr positions
+# there are sometimes multiple exons
+attr_all <- rbind(leaderless,leadered)
+
+# only keep ripps present in list from Mickey
+attr_all <- subset(attr_all, name %in% msdins$X4)
+
+
+# sort
+attr_all$name <- as.character(attr_all$name)
+attr_all <- attr_all[order(attr_all$name), ]
+
+# see types
+unique(attr_all$attr)
+
+# subset to exon
+attr_all1 <- subset(attr_all, attr == "exon1")
+attr_all2 <- subset(attr_all, attr == "exon2")
+
+# extract columns in the correct order to append to the gff
+msdins_cds <- as.data.frame(attr_all1$X1) # chromosome
+msdins_cds[,2] <- "5e757d1f96d78-evm" # I think this is genome name - matches gff?
+msdins_cds[,3] <- "CDS" # attribute type
+msdins_cds[,4] <- attr_all1$X2 # start pos
+msdins_cds[,5] <- attr_all1$X3 # end pos
+msdins_cds[,6] <- "." # score; . means NA
+msdins_cds[,7] <- attr_all1$X6 # + or - strand direction
+msdins_cds[,8] <- 0 # phase
+# The reading frame phase for CDS features (0, 1, 2; . for non-CDS)
+# if it is on the - strand, paste a 2
+msdins_cds <- msdins_cds %>%
+  mutate(V8 = ifelse(V7 == "-", 2, 0))
+# attributes column
+msdins_cds[,"X9"] <- paste0("ID=", msdins$X4,".m01.CDS01;Name=", msdins$X4,".m01.CDS01;Parent=", msdins$X4,".m01;original_ID=cds.", msdins$X4,".m01;Alias=cds.", msdins$X4,".m01;") 
+
+# duplicate for second exon & adjust start and end pos
+msdins_cds2 <- msdins_cds
+msdins_cds2[,4] <- attr_all2$X2 # start pos
+msdins_cds2[,5] <- attr_all2$X3 # end pos
+msdins_cds2[,"X9"] <- paste0("ID=", msdins$X4,".m01.CDS02;Name=", msdins$X4,".m01.CDS02;Parent=", msdins$X4,".m01;original_ID=cds.", msdins$X4,".m01;Alias=cds.", msdins$X4,".m01;") 
+
+# repeat and label as exons
+msdins_exon <- msdins_cds
+msdins_exon[,3] <- "exon"
+msdins_exon[,8] <- "."
+msdins_exon[,9] <- paste0("ID=", msdins$X4,".m01.exon01;Name=", msdins$X4,".m01.exon01;Parent=", msdins$X4,";original_ID=", msdins$X4,".m01.exon1;Alias=", msdins$X4,".m01.exon1;") 
+
+# duplicate for second exon
+msdins_exon2 <- msdins_cds2
+msdins_exon2[,3] <- "exon"
+msdins_exon2[,8] <- "."
+msdins_exon2[,9] <- paste0("ID=", msdins$X4,".m01.exon02;Name=", msdins$X4,".m01.exon02;Parent=", msdins$X4,";original_ID=", msdins$X4,".m01.exon2;Alias=", msdins$X4,".m01.exon2;") 
+
+# repeat and label as a gene
+msdins_gene <- msdins_cds
+msdins_gene[,3] <- "gene"
+msdins_gene[,8] <- "."
+msdins_gene[,4] <- gene_data_all$X1.1 # start pos
+msdins_gene[,5] <- gene_data_all$X2.2 # end pos
+msdins_gene[,9] <- paste0("ID=", msdins$X4,";Name=", msdins$X4,";original_ID=", msdins$X4,";Alias=", msdins$X4,";original_name=",msdins$X4,";") 
+
+# repeat and label as mRNA
+msdins_mRNA <- msdins_gene
+msdins_mRNA[,3] <- "mRNA"
+msdins_mRNA[,9] <- paste0("ID=", msdins$X4,".m01;Name=", msdins$X4,".m01;Parent=", msdins$X4,";original_ID=", msdins$X4,".m01;Alias=", msdins$X4,".m01;original_name=",msdins$X4,";") 
+
+
+msdins_all <- rbind(msdins_cds,
+                  msdins_exon,
+                  msdins_cds2,
+                  msdins_exon2,
+                  msdins_gene,
+                  msdins_mRNA)
+colnames(msdins_all) <- colnames(gff_data)
+
+# Sort the dataframe by 'seqid' (chromosome/contig) and 'start' position
+msdins_all$X4 <- as.numeric(msdins_all$X4)
+msdins_all <- msdins_all[order(msdins_all$X1, msdins_all$X4), ]
+# peek
+rmarkdown::paged_table(msdins_all, options = NULL)
+
+# save this as a .gff3 file
+write.table(msdins_all, "aphal_msdins_only.gff3", sep = "\t", quote = FALSE, row.names = FALSE, col.names = FALSE)
+
+
+# append to the end of gff_data
+
+gff_data2 <- rbind(gff_data,msdins_all)
+
+# sort gff_data2 by chromosome (column V1) and position (column V4)
+# Convert the 'start' column to numeric (if not already)
+gff_data2$X4 <- as.numeric(gff_data2$X4)
+
+# Sort the dataframe by 'seqid' (chromosome/contig) and 'start' position
+gff_sorted <- gff_data2[order(gff_data2$X1, gff_data2$X4), ]
+
+colnames(gff_sorted) <- c("seqid", "source", "type", "start", "end", "score", "strand", "phase", "attributes")
+
+# save sorted gff
+write.table(gff_sorted, "aphal_reff_with_msdins.gff3", sep = "\t", quote = FALSE, row.names = FALSE, col.names = FALSE)
+
+# remove vars
+rm(gff_data,gff_data2)
+rm(msdins_cds,msdins_exon,msdins_gene,msdins_mRNA,msdins_cds2,msdins_exon2)
+rm(attr_all1,attr_all2,gene_data,gene_data2)
+
+# print session info
+sessionInfo()
+```
+

@@ -1,0 +1,2130 @@
+---
+title: "A. phalloides RNAseq: DESeq2"
+author: "Livia Oster"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    theme: flatly
+    self_contained: true
+    toc: true
+    toc_float: true
+---
+
+# Extract mapping efficiency for hisat2
+
+```{r prepare_dirs_libraries}
+# import data and load packages
+suppressMessages(library(DESeq2))
+suppressMessages(library(rmarkdown))
+library(dplyr)
+library(tidyr)
+library(readr)
+
+dir <- getwd()
+dir
+dir2="/Volumes/Liv/Lab_projects/Amanita_phalloides"
+# make output directories
+subDir <- paste0(dir,"/Output_",Sys.Date())
+dir.create(path=subDir, showWarnings = FALSE)
+dir.create(paste0(subDir,"/Plots"), showWarnings = FALSE)
+dir.create(paste0(subDir,"/NormCount-Graphs"), showWarnings = FALSE)
+dir.create(paste0(subDir,"/NormCount-Graphs/Data"), showWarnings = FALSE)
+
+```
+
+```{r hisat_mapping_eff}
+# path to dir containing slurm-x.out files
+# slurm_out_path <- "D:/Aphalloides_rnaseq_for_leaderless/hisat2_output_msdins_array/"
+slurm_out_path <- paste0(dir2,"/MSI_outputs/hisat_output")
+# get list of file names
+out_files <- list.files(path=slurm_out_path, pattern=".out",full.names=TRUE,recursive=TRUE) 
+
+# write a function to extract mapping efficiency
+
+extract_hisat_mapping <- function(file_name) {
+  # for debugging:
+  #file_name = out_files[2]
+  
+  # open filename
+  library(readr)
+  temp <- read_tsv(file_name,show_col_types = FALSE)
+  
+  # Find the row index that contains "overall alignment rate"
+  # this is typically third from the bottom
+  index = nrow(temp)-2
+  #temp2<-temp[grepl("overall alignment rate",temp[,1]),]
+  mapping <- unlist(temp[index,1])
+  
+  
+  
+  # if this string contains %, then split by %, else print error
+ if (grep("%", mapping)==TRUE) {
+   
+   # extract percent
+   perc <- unlist(strsplit(mapping,split="%"))[1]
+   
+   # return this value to the console
+   return(perc)
+   
+ } else print("Error: mapping rate not found")
+  
+}
+
+# test it
+extract_hisat_mapping(out_files[3])
+
+# it works! now sapply to extract all the values
+
+# mapping <- data.frame(Input = out_files, perc_mapping = sapply(out_files, extract_hisat_mapping))
+
+# that didn't work because one or more files is not correctly formatted... use a loop
+mapping <- data.frame(Array = list.files(path=slurm_out_path, pattern=".out",full.names=FALSE,recursive=TRUE) , perc_mapping = "")
+
+# for (i in 1:length(out_files)) {
+for (i in c(1:length(out_files))) {
+  mapping[i,2] <- as.numeric(extract_hisat_mapping(out_files[i]))
+} 
+
+# find array index number for each sample
+mapping$Array <- gsub("\\.out", "", mapping$Array)
+
+# keep only second half of the Array name
+mapping$Array <- sub(".*_", "", mapping$Array)
+
+# Convert Array column to numeric and reorder
+mapping <- mapping %>%
+  mutate(Array = as.numeric(Array)) %>%
+  arrange(Array)
+
+# now match this to the metadata file
+metadata <- readxl::read_xlsx(paste0(dir,"/metadata.xlsx"),sheet="metadata")
+metadata$perc_mapping <- as.numeric(mapping$perc_mapping)
+metadata[,c("Sample_ID","Population","Origin","perc_mapping")]
+
+# find min, max, avg mapping rate
+min(metadata$perc_mapping)
+max(metadata$perc_mapping)
+mean(metadata$perc_mapping)
+sd(metadata$perc_mapping)
+
+# print mapping
+rmarkdown::paged_table(as.data.frame(metadata[,c("Sample_ID","Population","Origin","tot_reads_mill_trim","perc_mapping")]))
+
+# save as csv
+write.csv(metadata,paste0(subDir,"/metadata_plus_mapping.csv"),row.names=FALSE)
+```
+
+# Import featurecounts data & filter genes that are not expressed
+
+```{r read_data}
+# set factor level; this is important for comparisons later
+# group levels that are listed earlier in the list
+# will be prioritized as the denominator when you do DESEq2 comparisons
+# IE - the "wild type" or "control"
+metadata$Origin <- factor(metadata$Origin, levels = c("EU", "CA"))
+
+
+# paged_table(metadata)
+
+# make sure all files are present
+all(file.exists(metadata$Count_file))
+
+# if necessary - subset to only include samples where the file exists
+metadata <- metadata[file.exists(metadata$Count_file),]
+metadata[,c("Sample_ID","Population","Origin","perc_mapping")]
+
+# find min, max, avg mapping rate
+min(metadata$perc_mapping)
+max(metadata$perc_mapping)
+mean(metadata$perc_mapping)
+
+all(file.exists(metadata$Count_file))
+
+# exclude pet5 (low mapping rate, 4%) and pet1-redo
+metadata <- metadata[!metadata$Sample_ID %in% c("Pet1-redo","Pet5"),]
+# import data - first get file names
+files <- metadata$Count_file
+
+# associate those with sample ID
+names(files) <- paste(metadata$Sample_ID)
+
+# import the featurecounts files
+import_counts <- function(file_name) {
+  # first line is for debugging
+  # file_name = files[1]
+  # extract sample prefix
+  File_prefix <- unlist(strsplit(file_name,"/"))[8]
+  
+  temp <- read_tsv(file_name,comment="#",show_col_types = FALSE)
+  # rename column to File_prefix
+  colnames(temp)[7] <- File_prefix
+  # output the column of counts
+  output <- as.data.frame(temp[,7])
+  rownames(output) <- temp$Geneid
+  return(output)
+}
+
+# now run import_counts and cbind results together for all filenames in files
+output_list <- lapply(files, import_counts)
+
+# bind them together
+cts <- as.matrix(do.call(cbind, output_list))
+
+# rename rows to clean it up 
+# when I originally ran Hisat2, my gff listed GPVFFA as GPVFFAY
+# I also originally indexed the duplicated core sequences as core and core_1 instead of core_1 and core_2 so I will fix these here
+
+old_msdin <- c("GPVFFAY","AWLATCP","AWLATCP_1","IWGIGCDP","IWGIGCDP_1","LIQRPFAP","LIQRPFAP_1")
+
+# sort these alphabetical to match row order in cts
+index <- row.names(cts) %in% old_msdin
+row.names(cts)[index]
+
+# now make sure new name order is the same
+new_msdin <- c("AWLATCP_2","LIQRPFAP_1","AWLATCP_1","GPVFFA","IWGIGCDP_2","IWGIGCDP_1","LIQRPFAP_2")
+row.names(cts)[index] <-new_msdin
+
+# also fix messy gene IDs
+row.names(cts) <- gsub("^[^-]+-|\\.m01$", "", row.names(cts))
+
+head(cts,2)
+
+# check that the row order of metadata and column order of cts match
+
+coldata <- as.data.frame(metadata[,c("Origin","Population")])
+rownames(coldata) <- metadata$File_prefix
+
+coldata$Origin <- factor(coldata$Origin)
+coldata$Population <- factor(coldata$Population)
+
+coldata
+
+all(rownames(coldata) %in% colnames(cts))
+all(rownames(coldata) == colnames(cts))
+
+# both of these are true!
+# in case one of these was false, use the following logic:
+cts <- cts[, rownames(coldata)]
+all(rownames(coldata) == colnames(cts))
+
+# finally - generate dds object
+dds <- DESeqDataSetFromMatrix(countData = cts,
+                              colData = coldata,
+                              design = ~ Origin)
+dds
+
+# save cts object
+write.csv(cts,paste0(subDir,"/all_gene_raw_counts.csv"))
+
+# plot expression counts for all msdins quick
+msdins <- read_tsv("/Volumes/Liv/Lab_projects/Amanita_phalloides/aphalloides_reff/reff/cds_for_liv.bed", comment = "#", col_names = FALSE,show_col_types = FALSE)
+
+msdin_cores <- msdins$X4
+
+msdin_cts <- cts[rownames(cts) %in% msdin_cores,]
+msdin_cts <- msdin_cts[order(rownames(msdin_cts)), ]
+write.csv(msdin_cts,paste0(subDir,"/msdin_raw_counts.csv"))
+
+# get average for each row
+msdin_means <- rowMeans(msdin_cts)
+msdin_means
+# get number of samples with a count of zeros for each msdin
+num_zeros <- rowSums(msdin_cts == 0)
+num_zeros
+# print this:
+summary_df <- data.frame(
+  mean = msdin_means,
+  num_zeros = num_zeros
+)
+
+# remove low-count genes that have a mean count below 5
+# keep <- rowSums(counts(dds)) >= 10
+keep <- rowMeans(counts(dds)) >= 5
+
+sum(keep)
+
+# total genes - counting msdins
+length(dds)
+
+# total genes - excluding msdins
+length(dds) - length(msdin_cores)
+
+# count number of msdins (out of 33) that are above 5
+sum(msdin_means >= 5 )
+
+# percent
+sum(msdin_means >= 5 ) / length(msdin_cores) * 100
+
+# total genes detected - excluding msdins
+sum(keep) - sum(msdin_means >= 5 )
+
+# percent
+(sum(keep) - sum(msdin_means >= 5 )) / (length(dds) - length(msdin_cores)) * 100
+
+
+# find percentage of genes that have been kept after applying filter for low counts
+sum(keep) / length(dds) * 100
+
+# now subset your dds object to keep only "keep" rows
+dds <- dds[keep,]
+
+```
+# Run DESeq2
+
+```{r run_deseq}
+dds <- DESeq(dds)
+res = results(dds, alpha=0.05, independentFiltering=FALSE, cooksCutoff=TRUE)
+summary(res)
+resultsNames(dds)
+
+# save results
+resOrdered <- res[order(res$pvalue),]
+# add column to indicate significance
+resOrdered$significant_hits <- with(resOrdered, abs(log2FoldChange) > 1 & padj < 0.05)
+
+
+write.csv(as.data.frame(resOrdered), 
+          file=paste0(subDir,"/DESeq_output.csv"))
+```
+
+# QC results and generate first-pass plots
+
+## Volcano plots
+
+```{r volcano_function}
+# summarize results from dds
+# group1 will be the numerator (ie, treatment)
+# group2 will be denominator (ie, control)
+# gene_list is the list of genes you want to annotate on the volcano plot
+
+make_volcano <- function(group1,group2,gene_list = msdins$X4) {
+  # group1 = "CA"
+  # group2 = "EU"
+  # gene_list = msdins$X4
+  print(paste0(group1," vs ",group2))
+  
+  res <- results(dds, contrast=c("Origin", group1, group2), alpha=0.05, independentFiltering=FALSE, cooksCutoff=TRUE)
+  
+  # now save deseq results as a dataframe
+  deseqoutput <- as.data.frame(res)
+  
+  # plot it
+  library(EnhancedVolcano)
+  EnhancedVolcano(deseqoutput,
+                  lab = rownames(res),
+                  selectLab = gene_list,
+                  title = paste0(group1," vs. ",group2),
+                  subtitle = bquote(
+                    italic("")),
+                  caption = "",
+                  x = 'log2FoldChange',
+                  y = 'padj',
+                  pCutoff = 0.05,
+                  FCcutoff = 1,
+                  ylab = bquote(~-Log[10] ~ italic("Adj. P value")),
+                  legendPosition = 'bottom',
+                  typeConnectors ="closed",
+                  drawConnectors = TRUE,
+                  widthConnectors = 1,
+                  arrowheads = FALSE,
+                  labSize = 4,
+                  max.overlaps = 15,
+                  lengthConnectors = unit(0.02, "npc")) +
+    ggplot2::coord_cartesian(xlim=c(-6, 6), ylim=c(0,30)) +
+    ggplot2::scale_x_continuous(breaks=seq(-5,5, 1))
+  
+  ggsave(paste0(subDir,"/Plots/",group1,"_vs_",group2,"_volcano.png"),
+         units ="in",
+         width = 10,
+         height = 10)
+  
+  summary(res)
+  
+  # # shrink log fold changes
+  # resLFC <- lfcShrink(dds, coef=paste0("Group_",group2,"_vs_",group1), type="apeglm")
+  # resLFC
+  # 
+  # # use MA plot to visualize log2 fold changes
+  # plotMA(res,ylim=c(-2,2))
+  # 
+  # # plot the shrunken LFC which should remove noise from low count genes
+  # plotMA(resLFC, ylim=c(-2,2))
+}
+
+```
+
+```{r generate_volcanos, fig.width = 8, fig.asp = .8}
+make_volcano(group2 = "EU",
+             group1 = "CA")
+
+```
+
+## Plot counts for single genes
+
+``` {r make_count_plot_function}
+# make a plot for every gene and save it in a folder...
+make_count_plot <- function(geneID) {
+  # geneID = paste0(msdins$X4[10],".m01")
+  gene <- plotCounts(dds, gene = geneID, intgroup = "Origin", returnData = TRUE)
+
+  # Define color palette for Origin
+  gene$Origin <- factor(gene$Origin, levels = c("CA",
+                                                    "EU"))
+  
+  # also add pop information
+  gene$Population <- metadata$Population   
+
+  gene$Population <- factor(gene$Population, levels = c("Drake",
+                                                            "Pet",
+                                                            "Picnic",
+                                                            "Aso",
+                                                            "Champ",
+                                                            "Doc",
+                                                            "Gron",
+                                                            "Lamp",
+                                                            "Quill",
+                                                            "Tisza"))
+                          
+  # genotype_colors <- c("#717568","#3F4739", "#FF01FB", "#0CCA4A","grey40","grey60")
+  # colors for origin:
+  # genotype_colors <- c("#FE4A49", "#2292A4")
+
+genotype_colors <- c("#723D00","#fb8500","#ffb703",
+                     "#023047","#0C556E","#177995","#219EBC","#5CB7CE","#96CFE0","#D1E8F2")
+
+ggplot(data=gene,aes(x=Origin,y=count)) +
+  geom_point(aes(colour = Population), size = 4, position = position_jitter(w = 0.3, h = 0)) +
+  # add mean line
+  stat_summary(fun= mean, fun.min=mean, fun.max=mean, geom="crossbar", width=0.5, linewidth=1,color="black") +
+  # add error bars
+  stat_summary(fun.data=mean_se, fun.args = list(mult=1), geom="errorbar", width=0.2, linewidth=1,color="black") +
+  theme_classic()  +
+  scale_color_manual(values = genotype_colors) +
+  theme(legend.position = "none",
+        text = element_text(size = 16),
+        axis.text.x = element_text(angle = 45, hjust = 1, size = 14)) +
+  ylab("Normalized count") +
+  ggtitle(paste0(geneID))
+
+  # save graph
+  ggsave(paste0(geneID,"_normalized_counts.png"),
+         device="png",dpi="print",
+         units = "in", width = 5, height = 3,
+         path=paste0(subDir,"/NormCount-Graphs"))
+  # save data table 
+  write.csv(gene,paste0(subDir,"/NormCount-Graphs/Data/",geneID,".csv"))
+}
+
+```
+
+```{r generate_norm_count_plots}
+# MSDINs, leadered and leaderless:
+list <- msdins$X4
+
+# first see which of these genes have any counts at all
+# get counts matrix for all genes
+counts <- counts(dds, normalized=TRUE)
+# find list of RiPPs also in count matrix
+list <- intersect(list, rownames(counts))
+
+# loop through gene list
+for(i in 1:length(list)) {
+  genename = list[i]
+  make_count_plot(geneID=genename) # takes ~1.5 hr to run on 9000 genes
+}
+
+# in the future we could also plot a handful of housekeeping genes
+
+# next: generate facet_wrap graph for all MSDINS
+
+# also: violin plot for vsd expression of all
+
+
+```
+
+
+## Variance stabilizing transformations
+
+More info can be found at [DESeq2 Bioconductor tutorial](http://bioconductor.org/packages/devel/bioc/vignettes/DESeq2/inst/doc/DESeq2.html#exploring-and-exporting-results):
+
+These figures plot the standard deviation of transformed data. A flat curve of the square root of variance over the mean is ideal.
+
+```{r variance_stabilization, fig.show='hide'}
+# Extracting transformed values
+vsd <- vst(dds, blind=FALSE)
+ntd <- normTransform(dds)
+
+# extract the matrix of normalized values.
+head(assay(vsd), 3)
+
+# plots
+library(vsn)
+msd_dds <- meanSdPlot(assay(dds))
+msd_vsd <- meanSdPlot(assay(vsd))
+```
+
+```{r variance_plots, fig.show="hold", out.width="50%"}
+msd_dds$gg + ggtitle("Untransformed data") + ylim(-1,100)
+msd_vsd$gg + ggtitle("Variance stabilized transformation")
+
+```
+
+## Supervised clustering
+
+Check the heatmap of a subset of the data to see if replicates look similar to each other. This type of heatmap cluster is supervised, since we are picking the 20 genes with the biggest changes.
+
+It looks like 3 of the MSDINs are included in this list of top 20 genes with biggest changes, including the putative leaderless!
+
+```{r supervised_clustering}
+
+# find 15 genes with highest expression levels from dds
+select <- order(rowMeans(counts(dds,normalized=TRUE)),
+                decreasing=TRUE)[1:15]
+
+# make new data frame with only Population stage info
+df <- as.data.frame(colData(dds)[,c("Population")])
+colnames(df) <- c("Population")
+#samples <- colnames(assay(ntd))
+samples <- metadata$Sample_ID
+rownames(df) <- samples
+
+# heatmap of variance stabilized data
+library(pheatmap)
+
+# extract data
+mat <- assay(vsd)[select,]
+top15 <- row.names(mat)
+colnames(mat) <- metadata$Sample_ID
+
+# remove the random prefix and suffixes
+row.names(mat) <- gsub("^[^-]+-|\\.m01$", "", row.names(mat))
+row.names(mat)
+
+pheatmap(mat, cluster_rows=FALSE, 
+         show_rownames=TRUE,
+         cluster_cols=TRUE, annotation_col=df)
+
+# also make heatmap of genes with custom colors
+genotype_colors <- c("#723D00","#fb8500","#ffb703",
+                     "#023047","#0C556E","#177995","#219EBC","#5CB7CE","#96CFE0","#D1E8F2")
+
+annotation_colors <- list(Population = setNames(genotype_colors, unique(df$Population)))
+
+# Define your custom color scale (from dark blue to aqua)
+my_colors <- colorRampPalette(c("grey90","#03045e"))(100)
+
+
+pheatmap(mat, cluster_rows=FALSE, 
+         show_rownames=TRUE,
+         cluster_cols=TRUE,
+         annotation_col=df,
+         annotation_colors = annotation_colors,
+         legend=TRUE,
+         color=my_colors,
+         border_color = "transparent",
+         fontsize_row = 10,  # Row label font size
+         fontsize_col = 10)
+
+```
+##Do we know any functional information about the highly expressed transcripts?
+
+I used the following code to extract all the protein sequences that match the highly expressed genes, and then I used the online NCBI blastp to search human and Aspergillus fumigatus for closely related proteins with known functions or names. 
+
+Next let's figure out which genes are highly expressed...
+
+```{r get_top_proteins}
+library(rtracklayer)
+library(Biostrings)
+library(GenomicFeatures)
+
+# Define file paths
+genome_file <- "/Volumes/Liv/Lab_projects/Amanita_phalloides/aphalloides_reff/reff/10511_Aphal_PT_AllpathsLG_LINKS_jelly_pilon.fna"
+
+# make sure chromosomes are assigned correctly
+library(Rsamtools)
+
+# Load Genome Sequence
+genome_fa <- FaFile(genome_file)
+class(genome)
+names(genome)
+
+# Load GFF3
+gff <- paste0(dir,"/aphal_reff_with_msdins.gff3")
+gff_sorted <- read_tsv(gff, comment = "#", col_names = FALSE,show_col_types = FALSE)
+
+colnames(gff_sorted) <- c("seqid", "source", "type", "start", "end", "score", "strand", "phase", "attributes")
+
+sum(is.na(gff_sorted$start))  # Count missing start positions
+sum(is.na(gff_sorted$end))
+
+# Create TxDb from GFF3
+options(scipen = 999)
+txdb <- makeTxDbFromGFF(gff, format="gff3")
+# save txdb object
+saveDb(txdb, file = paste0(dir,"/txdb.sqlite"))
+
+# Extract CDS sequences from genome
+transcripts <- exonsBy(txdb, by="tx", use.names=TRUE)
+
+cds_seqs <- extractTranscriptSeqs(genome_fa, transcripts)
+
+# find cds that might not contain complete codons (length 3)
+invalid_cds <- names(cds_seqs)[width(cds_seqs) %% 3 != 0]
+invalid_cds
+
+# check for any invalid bases in the CDS sequences
+invalid_bases <- grepl("[^ATCG]", as.character(cds_seqs))
+invalid_seqs <- cds_seqs[invalid_bases]
+invalid_seqs
+# remove seqs with invalid bases 
+cds_seqs <- cds_seqs[!invalid_bases]
+
+# Translate to protein sequences
+protein_seqs <- translate(cds_seqs)
+head(names(protein_seqs))
+
+# fix names - remove "26557-" and ".m*"
+names(protein_seqs) <- sub("^26557-", "", names(protein_seqs))
+names(protein_seqs) <- sub("\\.m.*$", "", names(protein_seqs))
+
+head(names(protein_seqs))
+
+# Write to a FASTA file
+writeXStringSet(protein_seqs, paste0(dir,"/aphal_proteins.fasta"))
+
+cat("Protein sequences saved to aphal_proteins.fasta\n")
+
+
+```
+
+### Now extract highly expressed genes
+
+```{r id_high_expr_genes}
+top15
+
+
+# extract from fasta
+# if reading in a new fasta, use the following:
+# fasta <- paste0(dir,"/aphal_proteins.fasta")
+# #BiocManager::install("Biostrings")
+# 
+# library(Biostrings)
+# fasta_seqs <- readAAStringSet(fasta)
+
+# Match names in FASTA with entries in top15
+matched_seqs <- unique(protein_seqs[names(protein_seqs) %in% top15])
+# remove duplicates - msdins are showing up twice ...
+matched_seqs
+# save
+writeXStringSet(matched_seqs, filepath = paste0(dir,"/top15_sequences.fasta"))
+
+
+```
+
+## PCA / unsupervised clustering 
+
+A great interactive explanation of PCA plots is [here](https://bioboot.github.io/bggn213_F20/class-material/pca/)
+
+```{r cluster_heatmap_and_pca}
+# find distances between samples
+sampleDists <- dist(t(assay(vsd)))
+
+# reformat distances
+sampleDistMatrix <- as.matrix(sampleDists)
+
+# make row and column names the same as sample IDs
+rownames(sampleDistMatrix) <- rownames(df)
+colnames(sampleDistMatrix) <- rownames(df)
+
+# generate some nice colors
+library(RColorBrewer)
+colors <- colorRampPalette( rev(brewer.pal(9, "Blues")) )(255)
+
+# plot it
+pheatmap(sampleDistMatrix,
+         clustering_distance_rows=sampleDists,
+         clustering_distance_cols=sampleDists,
+         col=colors)
+
+# next lets generate a PCA plot on variance stabilized data
+vsd_out <- assay(vsd)
+
+# run PCA analysis
+pca <- prcomp(t(vsd_out))
+
+# plot scree
+library(factoextra)
+fviz_eig(pca)
+
+# Create data frame with metadata and PC3 and PC4 values for input to ggplot
+pcaData <- cbind(metadata[,c(2:5,8,13,15,18)], pca$x)
+
+# Define color palette for genotypes
+pcaData$Origin <- factor(pcaData$Origin, levels = c("CA",
+                                                    "EU"))
+genotype_colors <- c("#723D00","#fb8500","#ffb703",
+                     "#023047","#0C556E","#177995","#219EBC","#5CB7CE","#96CFE0","#D1E8F2")
+
+genotype_colors <- c("#fb8500", "#5CB7CE")
+
+# find percent variance for PC1 and PC2
+# summary of variance
+pcasummary <- summary(pca)
+pcasummary
+pc1var <- round(pcasummary$importance[2],digits = 4) * 100
+pc2var <- round(pcasummary$importance[5],digits = 4) * 100
+pc3var <- round(pcasummary$importance[8],digits = 4) * 100
+pc4var <- round(pcasummary$importance[11],digits = 4) * 100
+
+
+# plot PC1 and 2
+ggplot(pcaData,aes(x=PC1, y=PC2, color = Origin, shape = Origin)) +
+  geom_point(size=3) + 
+  theme_classic() +
+  scale_color_manual(values = genotype_colors) +
+  xlab(paste0("PC1 (",pc1var,"% variance)")) +
+  ylab(paste0("PC2 (",pc2var,"% variance)"))
+
+ggsave("PCA_plot_pc12_origin.png",
+       path = paste0(subDir,"/Plots/"),
+       units="in",
+       width = 6, height = 5)
+
+# plot PC3 and 4
+ggplot(pcaData,aes(x=PC3, y=PC4, color = Origin, size = Origin)) +
+  geom_point(size=3) + 
+  theme_classic() +
+  scale_color_manual(values = genotype_colors) +
+  xlab(paste0("PC3 (",pc3var,"% variance)")) +
+  ylab(paste0("PC4 (",pc4var,"% variance)"))
+
+ggsave("PCA_plot_pc34_origin.png",
+       path = paste0(subDir,"/Plots/"),
+       units="in",
+       width = 6, height = 5)
+
+# also plot where colors indicate population & shape indicates Origin
+
+# deduplicate
+t <- unique(metadata[,c(4,8)])
+t
+
+pcaData$Population <- factor(pcaData$Population, levels = c("Drake",
+                                                            "Pet",
+                                                            "Picnic",
+                                                            "Aso",
+                                                            "Champ",
+                                                            "Doc",
+                                                            "Gron",
+                                                            "Lamp",
+                                                            "Quill",
+                                                            "Tisza"))
+# first 3 are CA, last 7 are EU
+genotype_colors <- c("#723D00","#fb8500","#ffb703",
+                     "#023047","#0C556E","#177995","#219EBC","#5CB7CE","#96CFE0","#D1E8F2")
+
+
+ggplot(pcaData,aes(x=PC1, y=PC2, color = Population, shape = Origin)) +
+  geom_point(size=4) + 
+  theme_classic() +
+  scale_color_manual(values = genotype_colors) +
+stat_ellipse(aes(group = Origin), colour = "black")+                 
+  xlab(paste0("PC1 (",pc1var,"% variance)")) +
+  ylab(paste0("PC2 (",pc2var,"% variance)"))
+
+ggsave("PCA_plot_pc12_population_origin.png",
+       path = paste0(subDir,"/Plots/"),
+       units="in",
+       width = 6, height = 5)
+
+ggplot(pcaData,aes(x=PC3, y=PC4, color = Population, shape = Origin)) +
+  geom_point(size=3) + 
+  theme_classic() +
+  scale_color_manual(values = genotype_colors) +
+  xlab(paste0("PC3 (",pc3var,"% variance)")) +
+  ylab(paste0("PC4 (",pc4var,"% variance)"))
+
+ggsave("PCA_plot_pc34_population_origin.png",
+       path = paste0(subDir,"/Plots/"),
+       units="in",
+       width = 6, height = 5)
+
+## now plot PCA where color indicates mapping rate
+ggplot(pcaData,aes(x=PC1, y=PC2, color = perc_mapping, shape = Origin)) +
+  geom_point(size=3) + 
+  theme_classic() +
+  scale_color_viridis_c() +
+  #paletteer::scale_color_paletteer_c("viridis::plasma") +
+  #scale_color_manual(values = genotype_colors) +
+  xlab(paste0("PC1 (",pc1var,"% variance)")) +
+  ylab(paste0("PC2 (",pc2var,"% variance)"))
+
+ggsave("PCA_plot_pc12_percmapping_origin.png",
+       path = paste0(subDir,"/Plots/"),
+       units="in",
+       width = 6, height = 5)
+
+# plot mapping rates for both pops
+ggplot(pcaData, aes(x=Origin,y=perc_mapping, color=Population,shape=Origin)) +
+  geom_point(size = 4, position = position_jitter(w = 0.3, h = 0)) +
+  # add mean line
+  stat_summary(fun= mean, fun.min=mean, fun.max=mean, geom="crossbar", width=0.5, linewidth=1,color="black") +
+  # add error bars
+  stat_summary(fun.data=mean_se, fun.args = list(mult=1), geom="errorbar", width=0.2, linewidth=1,color="black") + 
+  scale_color_manual(values = genotype_colors) +
+  theme_classic()
+
+# do a statistical test
+# Perform t-test comparing perc_mapping values between EU and CA
+t_test_result <- t.test(perc_mapping ~ Origin, data = pcaData)
+
+# View t-test results
+print(t_test_result)
+
+ggsave("percmapping_origin_population.png",
+       path = paste0(subDir,"/Plots/"),
+       units="in",
+       width = 4, height = 5)
+
+# export pca data for separate graphing
+write.csv(pcaData[,1:10],paste0(subDir,"/pca_data.csv"),row.names=FALSE)
+
+
+# also plot norm counts for leaderless with population colored...
+gene <- plotCounts(dds, gene = "MLGFLVLP", intgroup = "Origin", returnData = TRUE)
+
+  # Define color palette for Origin
+  gene$Origin <- factor(gene$Origin, levels = c("CA",
+                                                    "EU"))
+  gene$Population <- metadata$Population   
+
+  gene$Population <- factor(gene$Population, levels = c("Drake",
+                                                            "Pet",
+                                                            "Picnic",
+                                                            "Aso",
+                                                            "Champ",
+                                                            "Doc",
+                                                            "Gron",
+                                                            "Lamp",
+                                                            "Quill",
+                                                            "Tisza"))
+ggplot(data=gene,aes(x=Origin,y=count)) +
+  geom_point(aes(colour = Population), size = 4, position = position_jitter(w = 0.3, h = 0)) +
+  # add mean line
+  stat_summary(fun= mean, fun.min=mean, fun.max=mean, geom="crossbar", width=0.5, linewidth=1,color="black") +
+  # add error bars
+  stat_summary(fun.data=mean_se, fun.args = list(mult=1), geom="errorbar", width=0.2, linewidth=1,color="black") +
+  theme_classic()  +
+  scale_color_manual(values = genotype_colors) +
+  theme(legend.position = "none",
+        text = element_text(size = 16),
+        axis.text.x = element_text(angle = 45, hjust = 1, size = 14)) +
+  ylab("Normalized count") +
+  ggtitle("MLGFLVLP")
+
+  # save graph
+  ggsave(paste0("MLGFLVLP","_pop_normalized_counts.png"),
+         device="png",dpi="print",
+         units = "in", width = 5, height = 3,
+         path=paste0(subDir,"/NormCount-Graphs"))
+
+```
+
+## additional QC - Histogram of overall gene expression for EU vs CA
+
+```{r compare_all_gene_expr}
+# get norm counts for all genes
+norm_counts <- counts(dds, normalized=TRUE)
+
+# aggregate by origin (CA or EU)
+# Step 1: Read metadata
+#metadata <- readxl::read_xlsx(paste0(dir,"/metadata.xlsx"),sheet="metadata")
+
+# Step 2: Make sure metadata and norm_counts align
+all(colnames(norm_counts) %in% metadata$File_prefix)  # Should return TRUE
+
+# Step 3: Get Origin for each sample
+origin_vector <- metadata$Origin[match(colnames(norm_counts), metadata$File_prefix)]
+
+# Step 4: Aggregate norm_counts by Origin
+library(dplyr)
+
+# Transpose, bind Origin, then group and summarize
+norm_counts_t <- as.data.frame(t(norm_counts))
+norm_counts_t$Origin <- origin_vector
+
+aggregated <- norm_counts_t %>%
+  group_by(Origin) %>%
+  summarise(across(.cols = where(is.numeric), .fns = mean))
+
+# Step 5: Transpose back to original gene-by-sample format
+norm_counts_by_origin <- as.data.frame(t(aggregated[,-1]))
+colnames(norm_counts_by_origin) <- aggregated$Origin
+
+# plot histogram
+library(ggplot2)
+library(ggbreak)
+# Step 1: Reshape your data for plotting (long format)
+norm_counts_long <- tidyr::pivot_longer(norm_counts_by_origin, 
+                                         cols = c(EU, CA), 
+                                         names_to = "Origin", 
+                                         values_to = "Count")
+
+# Step 2: Plot histogram
+ggplot(norm_counts_long, aes(x = Count, fill = Origin)) +
+  geom_histogram(binwidth = 1000, alpha = 0.7, position = "dodge") +
+  scale_fill_manual(values = c("EU" = '#5CB7CE', "CA" = '#fb8500')) +
+  labs(title = "Histogram of Counts for EU and CA", x = "Count", y = "Frequency") +
+  theme_classic() +
+  theme(legend.title = element_blank()) + # Optional: Remove legend title
+  xlim(0, 20000) +
+  scale_y_break(c(400, 1000), scales = 0.5)  # breaks the y-axis between 200 and 19500
+
+# calculate rank sum p value
+wilcox.test(Count ~ Origin, data = norm_counts_long, subset = Origin %in% c("CA", "EU"))
+
+```
+
+There is no significant difference in the relative amounts of gene expression between both EU and CA mushrooms.
+
+# Plots for publication
+
+## Extract DEseq2 results
+
+The next bit of code will generate a new table from DESeq2 results, keeping only log2FC and padj for each genotype and comparison.
+
+I saved it as a function to mini-fy each DESeq2 output table
+
+group1 or group2 = comparison from deseq you want to make mini
+
+```{r get_deseq_results}
+
+make_mini <- function(group1,group2,prefix="",keepmean=TRUE) {
+  # group1 = "control"
+  # group2 = "treatment"
+  # prefix = "wildtype" # description you want used in your output minitable
+  temp <- as.data.frame(results(dds,
+                                contrast=c("Origin", group1, group2),
+                                alpha=0.05,
+                                , independentFiltering=FALSE, cooksCutoff=TRUE))
+  temp$ID <- row.names(temp)
+  
+  output <- temp[,c("ID","baseMean","log2FoldChange","padj")]
+  colnames(output) <- c("ID","baseMean",
+                        paste0(prefix,"_L2FC"),
+                        paste0(prefix,"_padj"))
+  
+  # if specified above, do not keep the baseMean column
+  if(keepmean==FALSE) {
+    output <- output[,c("ID",
+                        paste0(prefix,"_L2FC"),
+                        paste0(prefix,"_padj"))]
+  }
+  
+  return(output)
+}
+
+deseq_results <- make_mini("CA","EU","EU_vs_CA")
+deseq_results$ID <- gsub("^[^-]+-|\\.m01$", "", deseq_results$ID )
+
+rmarkdown::paged_table(deseq_results[msdins$X4,], options = NULL)
+
+```
+
+## Heatmap
+
+```{r pretty_heatmap}
+# also make heatmap of genes with custom colors
+genotype_colors <- c("#723D00","#fb8500","#ffb703",
+                     "#023047","#0C556E","#177995","#219EBC","#5CB7CE","#96CFE0","#D1E8F2")
+
+annotation_colors <- list(Population = setNames(genotype_colors, unique(df$Population)))
+
+# Define your custom color scale (from dark blue to aqua)
+my_colors <- colorRampPalette(c("grey90","#03045e"))(100)
+
+# log transform count data
+mat_log <- counts(dds, normalized=TRUE)[select,]
+mat_log <- log10(mat_log)
+
+top15 <- row.names(mat_log)
+colnames(mat_log) <- metadata$Sample_ID
+
+# remove the random prefix and suffixes
+row.names(mat_log) <- gsub("^[^-]+-|\\.m01$", "", row.names(mat_log))
+row.names(mat_log)
+
+# remove log10(0) values that are -Inf
+mat_log[mat_log == -Inf] <- 0
+
+library(grid)
+
+
+heatmap_plot <- pheatmap(mat_log, cluster_rows=FALSE, 
+         show_rownames=TRUE,
+         cluster_cols=TRUE,
+         treeheight_col = 30,
+         annotation_col=df,
+         annotation_colors = annotation_colors,
+         legend=TRUE,
+         color=my_colors,
+         legend_width = unit(0.2, "in"),
+         legend_position = "right",
+         border_color = "transparent")
+
+gtable_obj <- heatmap_plot$gtable
+
+# Modify the legend's vertical position
+# Find the legend in the gtable and move it up
+gtable_obj$grobs[[which(gtable_obj$layout$name == "legend")]]$grobs[[1]]$gp <- gpar(fontsize = 20)  # Set the font size to 10
+
+
+# Modify the y position of the annotation_colors legend
+# Adjust the y-coordinate to move the legend up
+annotation_legend_index <- which(gtable_obj$layout$name == "annotation_legend")
+gtable_obj$grobs[[annotation_legend_index]]$grobs[[1]]$gp <- gpar(fontsize = 20)  # Set the font size to 10
+
+
+
+# Draw the modified heatmap with legend moved up
+pdf(paste0(subDir,"/Plots/heatmap.pdf"), width = 8, height = 5, family="ArialMT")  # Specify desired width and height
+
+grid.draw(gtable_obj)
+dev.off()
+
+# Transpose the matrix
+mat_rotated <- t(mat_log)
+
+pdf(paste0(subDir,"/Plots/heatmap_transposed.pdf"), width = 5, height = 8, family="ArialMT")  # Specify desired width and height
+
+heatmap_plot<-pheatmap(mat_rotated, cluster_rows=TRUE, 
+         show_rownames=TRUE,
+         cluster_cols=FALSE,
+         treeheight_col = 30,
+         annotation_col=df,
+         annotation_colors = annotation_colors,
+         legend=TRUE,
+         color=my_colors,
+         legend_width = unit(0.2, "in"),
+         legend_position = "right",
+         border_color = "transparent")
+gtable_obj <- heatmap_plot$gtable
+grid.draw(gtable_obj)
+
+dev.off()
+
+```
+
+## Supplemental figure: log10 counts for MSDINs
+
+```{r pretty_facets_vsd}
+
+######### FACET_WRAP log10 COUNTS
+# extract variance stabilized gene count data for all msdin genes
+
+# list of all msdins
+list
+
+missing_genes <- setdiff(list, rownames(dds))
+missing_genes
+
+list <- intersect(list, rownames(dds))
+
+
+# generate facet_wrap for these samples
+
+# extract data
+mat2 <- as.data.frame(counts(dds,normalized=TRUE)[list,])
+# log transform
+mat2 <- log10(mat2)
+# remove log10(0) values that are -Inf
+mat2[mat2 == -Inf] <- 0
+colnames(mat2) <- metadata$Sample_ID
+
+# Reshape the data from wide to long format
+library(tidyverse)
+mat2_long <- mat2 %>%
+  rownames_to_column("MSDIN") %>%        # Convert row names into a column
+  pivot_longer(cols = -MSDIN,            # Pivot columns except for "Row"
+               names_to = "Sample_ID",    # New column for column names
+               values_to = "Value")    # New column for values
+
+# add a new column to facet over:
+# msdin type
+msdin_type <- c("Known","Known SFFFPIP","Leaderless","Prolineless")
+noncanonical <- c("MLGFLVLP","GPVFFA")
+
+# Add the "Type" column
+mat2_long$Type <- ifelse(mat2_long$MSDIN %in% noncanonical, "Noncanonical", "Known")
+mat2_long$Type <- ifelse(mat2_long$MSDIN %in% "SFFFPIP", "Known SFFFPIP",mat2_long$Type)
+mat2_long$Type <- ifelse(mat2_long$MSDIN %in% "MLGFLVLP", "Leaderless",mat2_long$Type)
+mat2_long$Type <- ifelse(mat2_long$MSDIN %in% "GPVFFA", "Prolineless",mat2_long$Type)
+
+# add additional metadata:
+# Population
+metadata2 <- metadata[,c("Sample_ID","Population","Origin")]
+mat2_long <- mat2_long %>%
+  left_join(metadata2, by = "Sample_ID")
+
+# set order
+mat2_long$Origin <- factor(mat2_long$Origin, levels = c("CA",
+                                                    "EU"))
+
+mat2_long$Population <- factor(mat2_long$Population, levels = c("Drake",
+                                                            "Pet",
+                                                            "Picnic",
+                                                            "Aso",
+                                                            "Champ",
+                                                            "Doc",
+                                                            "Gron",
+                                                            "Lamp",
+                                                            "Quill",
+                                                            "Tisza"))
+
+# extract p values for each MSDIN
+deseq_msdin <- deseq_results[list,]
+
+subset(deseq_msdin,EU_vs_CA_L2FC > 1 & EU_vs_CA_padj < 0.05)[,1]
+subset(deseq_msdin,EU_vs_CA_L2FC < -1 & EU_vs_CA_padj < 0.05)[,1]
+
+# round p values
+options(scipen = 999)
+
+deseq_msdin$EU_vs_CA_padj <- signif(deseq_msdin$EU_vs_CA_padj, 3)
+deseq_msdin$EU_vs_CA_padj <- formatC(deseq_msdin$EU_vs_CA_padj, format = "g", digits = 3)
+
+colnames(deseq_msdin)[1] <-"MSDIN"
+# merge this onto mat2_long
+mat2_long <- merge(mat2_long,deseq_msdin,by="MSDIN",all.x=TRUE)
+mat2_long$EU_vs_CA_padj <- as.numeric(mat2_long$EU_vs_CA_padj)
+
+# now plot it and facet by MSDIN
+pdf(paste0(subDir,"/Plots/log10_msdin.pdf"), width = 12, height = 12, family="ArialMT")  # Specify desired width and height
+
+ggplot(data=mat2_long,aes(x=Origin,y=Value)) +
+  geom_point(aes(colour = Population), size = 4, position = position_jitter(w = 0.3, h = 0)) +
+  # add mean line
+  stat_summary(fun= mean, fun.min=mean, fun.max=mean, geom="crossbar", width=0.5, linewidth=1,color="black") +
+  # add error bars
+  stat_summary(fun.data=mean_se, fun.args = list(mult=1), geom="errorbar", width=0.2, linewidth=1,color="black") +
+  theme_classic()  +
+  scale_color_manual(values = genotype_colors) +
+  theme(legend.position = "none",
+        text = element_text(size = 16),
+        axis.text.x = element_text(angle = 45, hjust = 1, size = 10)) +
+  ylab("Log10(normalized count)") +
+  facet_wrap(Type~MSDIN)+
+  # Add p-value labels on each facet
+  geom_text(aes(x = 1.5, y = max(Value) * 0.9, label = sprintf("p = %.3f", EU_vs_CA_padj)), size = 5, color = "black", inherit.aes = FALSE)
+
+dev.off()
+
+```
+
+## Another version; Normalized counts for each MSDIN
+
+```{r pretty_facets_norm}
+
+# also do this with normalized counts
+# extract data
+mat3 <- as.data.frame(counts[list,])
+colnames(mat3) <- metadata$Sample_ID
+
+# Reshape the data from wide to long format
+mat3_long <- mat3 %>%
+  rownames_to_column("MSDIN") %>%        # Convert row names into a column
+  pivot_longer(cols = -MSDIN,            # Pivot columns except for "Row"
+               names_to = "Sample_ID",    # New column for column names
+               values_to = "Value")    # New column for values
+
+# add a new column to facet over:
+# msdin type
+msdin_type <- c("canonical","new","leaderless","prolineless")
+noncanonical <- c("MLGFLVLP","GPVFFA")
+
+# Add the "Type" column
+mat3_long$Type <- ifelse(mat3_long$MSDIN %in% noncanonical, "noncanonical", "canonical")
+mat3_long$Type <- ifelse(mat3_long$MSDIN %in% "SFFFPIP", "new",mat3_long$Type)
+mat3_long$Type <- ifelse(mat3_long$MSDIN %in% "MLGFLVLP", "leaderless",mat3_long$Type)
+mat3_long$Type <- ifelse(mat3_long$MSDIN %in% "GPVFFA", "prolineless",mat3_long$Type)
+
+# add additional metadata:
+# Population
+metadata2 <- metadata[,c("Sample_ID","Population","Origin")]
+mat3_long <- mat3_long %>%
+  left_join(metadata2, by = "Sample_ID")
+
+# set order
+mat3_long$Origin <- factor(mat3_long$Origin, levels = c("CA",
+                                                    "EU"))
+
+mat3_long$Population <- factor(mat3_long$Population, levels = c("Drake",
+                                                            "Pet",
+                                                            "Picnic",
+                                                            "Aso",
+                                                            "Champ",
+                                                            "Doc",
+                                                            "Gron",
+                                                            "Lamp",
+                                                            "Quill",
+                                                            "Tisza"))
+
+
+
+# now plot it and facet by MSDIN
+pdf(paste0(subDir,"/Plots/normcount_msdin.pdf"), width = 12, height = 12, family="ArialMT")  # Specify desired width and height
+
+ggplot(data=mat3_long,aes(x=Origin,y=Value)) +
+  geom_point(aes(colour = Population), size = 4, position = position_jitter(w = 0.3, h = 0)) +
+  # add mean line
+  stat_summary(fun= mean, fun.min=mean, fun.max=mean, geom="crossbar", width=0.5, linewidth=1,color="black") +
+  # add error bars
+  stat_summary(fun.data=mean_se, fun.args = list(mult=1), geom="errorbar", width=0.2, linewidth=1,color="black") +
+  theme_classic()  +
+  scale_color_manual(values = genotype_colors) +
+  theme(legend.position = "none",
+        text = element_text(size = 16),
+        strip.background = element_blank(),
+        strip.text = element_text(face = "bold"),
+        axis.text.x = element_text(angle = 45, hjust = 1, size = 10)) +
+  ylab("Normalized count") +
+  facet_wrap(~MSDIN, scales = "free_y")
+
+dev.off()
+
+```
+
+## Violin plots and statistical tests
+
+```{r pretty_violin}
+# adjust type names for the graph
+mat4_long<- mat2_long %>%
+  mutate(Type = recode(Type, 
+                       "Known" = "Known MSDINs",
+                       "Known SFFFPIP" = "Known SFFFPIP",
+                       "Prolineless" = "Prolineless GPVFFA", 
+                       "Leaderless" = "Leaderless MLGFLVLP"))
+
+genotype_colors <- c("#723D00","#fb8500","#ffb703",
+                     "#023047","#0C556E","#177995","#219EBC","#5CB7CE","#96CFE0","#D1E8F2")
+
+
+# set order
+mat4_long$Type <- factor(mat4_long$Type, levels = c("Known MSDINs",
+                                                    "Known SFFFPIP",
+                                                    "Leaderless MLGFLVLP",
+                                                    "Prolineless GPVFFA"))
+
+pdf(paste0(subDir,"/Plots/violin.pdf"), width = 4.5, height = 2.5, family="ArialMT")
+
+ggplot(data=mat4_long,aes(x=Origin,y=Value,fill=Origin)) +
+geom_violin(trim = FALSE, adjust = 0.6, draw_quantiles = c(0.25, 0.75), linetype = "dashed") +
+  geom_violin(trim = FALSE, adjust = 0.6, draw_quantiles = 0.5, fill="transparent") +
+  theme_classic()  +
+  scale_fill_manual(values = c("#fb8500", "#0C556E")) +
+  ylab("Log10(normalized count)") +
+    coord_cartesian(ylim = c(-0.5, 7)) +
+  #geom_hline(yintercept = 0, color = "black", linetype = "solid", size = 1) +  # Black line at y=0
+  facet_wrap(~Type, ncol=4) +
+  theme(panel.spacing = unit(0, "lines"),
+        strip.background = element_blank(),
+        strip.text = element_text(face = "bold"),
+        legend.position = "none",
+        text = element_text(color = "black",size = 10))
+
+dev.off()
+
+##### determine if normal distribution
+
+# Group-wise Shapiro-Wilk test
+normality_tests <- mat4_long %>%
+  group_by(Origin, Type) %>%
+  summarize(
+    n = n(),
+    mean = mean(Value, na.rm = TRUE),
+    sem = sd(Value, na.rm = TRUE) / sqrt(n),
+    shapiro_p = shapiro.test(Value)$p.value,
+    is_normal = shapiro_p > 0.05
+  )
+
+print(normality_tests)
+
+
+#### also plot known and new/noncanonical separately
+sub_canon <- subset(mat4_long,Type=="Known MSDINs")
+pdf(paste0(subDir,"/Plots/violin_canon.pdf"), width = 1.5, height = 2.5, family="ArialMT")
+
+ggplot(data=sub_canon,aes(x=Origin,y=Value,fill=Origin)) +
+geom_violin(trim = FALSE, adjust = 0.6, draw_quantiles = c(0.25, 0.75), linetype = "dashed") +
+  geom_violin(trim = FALSE, adjust = 0.6, draw_quantiles = 0.5, fill="transparent") +
+  theme_classic()  +
+  scale_fill_manual(values = c("#fb8500", "#0C556E")) +
+  ylab("Log10(normalized count)") +
+    coord_cartesian(ylim = c(-0.5, 7)) +
+  #geom_hline(yintercept = 0, color = "black", linetype = "solid", size = 1) +  # Black line at y=0
+  facet_wrap(~Type, ncol=4) +
+  theme(panel.spacing = unit(0, "lines"),
+        strip.background = element_blank(),
+        strip.text = element_text(face = "bold"),
+        legend.position = "none",
+        text = element_text(color = "black",size = 10))
+
+dev.off()
+
+
+sub_noncanon <- subset(mat4_long,Type!="Known MSDINs")
+pdf(paste0(subDir,"/Plots/violin_noncanon.pdf"), width = 3.5, height = 2.5, family="ArialMT")
+
+ggplot(data=sub_noncanon,aes(x=Origin,y=Value,fill=Origin)) +
+  geom_violin(trim = FALSE, adjust = 0.6, draw_quantiles = c(0.25, 0.75), linetype = "dashed") +
+  geom_violin(trim = FALSE, adjust = 0.6, draw_quantiles = 0.5, fill="transparent") +
+  theme_classic()  +
+  scale_fill_manual(values = c("#fb8500", "#0C556E")) +
+  ylab("Log10(normalized count)") +
+  coord_cartesian(ylim = c(-0.5, 7)) +
+  #geom_hline(yintercept = 0, color = "black", linetype = "solid", size = 1) +  # Black line at y=0
+  facet_wrap(~Type, ncol=4) +
+  theme(panel.spacing = unit(0, "lines"),
+        strip.background = element_blank(),
+        strip.text = element_text(face = "bold"),
+        legend.position = "none",
+        text = element_text(color = "black",size = 10))
+
+dev.off()
+
+library(dplyr)
+
+# Run ANOVA for each Type
+mat4_long$Var <- paste0(mat4_long$Origin,"_",mat4_long$Type)
+# get log10:
+# apply pseudocount for zeros
+mat4_long$Value_log10 <- log10(mat4_long$Value +1)
+df <- mat4_long[,c("Var","Value_log10")]
+
+# make a plot of values
+df$Var<-as.factor(df$Var)
+
+df%>%ggplot(aes(x=Value_log10, fill=Var))+geom_density(alpha=0.5)
+
+# anova
+model1<-lm(Value_log10~Var, data=df)
+anova(model1)
+# Print results
+# Tukey multiple comparisons
+library(multcomp)
+anova_results<-summary(glht(model1, mcp(Var="Tukey")))
+anova_results
+# Extract coefficients and p-values into a data frame
+tukey_df <- as.data.frame(anova_results$test[c("coefficients", "sigma", "tstat", "pvalues")])
+
+# Add row names as a column for pairwise comparison names
+tukey_df$comparison <- rownames(tukey_df)
+rownames(tukey_df) <- NULL
+
+# Reorder columns to have comparison first
+tukey_df <- tukey_df[, c("comparison", "coefficients", "sigma", "tstat", "pvalues")]
+write.csv(tukey_df, paste0(subDir,"/violin_anova_results.csv"),row.names=FALSE)
+
+
+# List of comparisons
+comparisons <- list(
+  c("CA_Leaderless MLGFLVLP", "CA_Known MSDINs"),
+  c("CA_Prolineless GPVFFA", "CA_Known MSDINs"),
+  c("CA_Known SFFFPIP", "CA_Known MSDINs"),
+  
+  c("EU_Known MSDINs", "CA_Known MSDINs"),
+  c("EU_Known SFFFPIP", "CA_Known SFFFPIP"),
+  c("EU_Leaderless MLGFLVLP", "CA_Leaderless MLGFLVLP"),
+  c("EU_Prolineless GPVFFA", "CA_Prolineless GPVFFA"),
+  
+  c("EU_Leaderless MLGFLVLP", "EU_Known MSDINs"),
+  c("EU_Prolineless GPVFFA", "EU_Known MSDINs"),
+  c("EU_Known SFFFPIP", "EU_Known MSDINs"),
+  
+  c("EU_Prolineless GPVFFA", "EU_Leaderless MLGFLVLP")
+)
+
+# Function to run t-test
+run_t_test <- function(group1, group2) {
+  # Subset the data for each group
+  group1_data <- df[df$Var == group1, "Value_log10"]
+  group2_data <- df[df$Var == group2, "Value_log10"]
+  
+  # Perform t-test
+  test_result <- t.test(group1_data, group2_data)
+  
+  # Return the result (comparison name, p-value, and test statistics)
+  return(data.frame(
+    Comparison = paste(group1, "vs", group2),
+    p_value = test_result$p.value,
+    statistic = test_result$statistic,
+    conf_low = test_result$conf.int[1],
+    conf_high = test_result$conf.int[2]
+  ))
+}
+
+# Apply the function to all comparisons and combine the results
+t_test_results <- do.call(rbind, lapply(comparisons, function(x) run_t_test(x[1], x[2])))
+
+# Write the results to a CSV file
+write.csv(t_test_results, paste0(subDir,"/violin_t_test_results.csv"), row.names = FALSE)
+
+# Display the results
+print(t_test_results)
+
+# now do mann whitney u
+run_mann_whitney <- function(group1, group2) {
+  # Subset the data for each group
+  group1_data <- df[df$Var == group1, "Value_log10"]
+  group2_data <- df[df$Var == group2, "Value_log10"]
+  
+  # Perform Wilcoxon rank-sum test (Mann–Whitney U test)
+  test_result <- wilcox.test(group1_data, group2_data, exact = FALSE)
+  
+  # Return the result (comparison name, p-value, and W statistic)
+  return(data.frame(
+    Comparison = paste(group1, "vs", group2),
+    p_value = test_result$p.value,
+    statistic = test_result$statistic
+  ))
+}
+
+mann_whitney_results <- do.call(rbind, lapply(comparisons, function(comp) {
+  run_mann_whitney(comp[1], comp[2])
+}))
+mann_whitney_results$p_value <- format(mann_whitney_results$p_value, scientific = TRUE)
+
+print(mann_whitney_results)
+
+```
+
+## Supplemental volcano plot
+
+```{r pretty_volcano}
+group1 = "CA"
+group2 = "EU"
+gene_list = msdins$X4 # list of MSDINs
+print(paste0(group1," vs ",group2))
+
+
+res <- results(dds, contrast=c("Origin", group1, group2), alpha=0.05, independentFiltering=FALSE, cooksCutoff=TRUE)
+
+# now save deseq results as a dataframe
+deseqoutput <- as.data.frame(res)
+
+# anything past -5 or 5 log2FoldChange, clip to -5 or 5 respectively
+deseqoutput$log2FC_clip <- pmax(pmin(deseqoutput$log2FoldChange, 5), -5)
+
+# also clip high pvals at 20
+deseqoutput$padj_clip <- pmax(deseqoutput$padj, 0.00000000000000000001)
+
+#c("#fb8500", "#5CB7CE")
+# Create a custom color vector
+keyvals <- ifelse(deseqoutput$log2FoldChange > 1 & deseqoutput$padj < 0.05, '#fb8500',
+                  ifelse(deseqoutput$log2FoldChange < -1 & deseqoutput$padj < 0.05, '#5CB7CE', 'grey70'))
+
+names(keyvals) <- rownames(deseqoutput)
+
+deseqoutput$neglog10_padj <- -log10(deseqoutput$padj_clip)
+
+label_data <- subset(deseqoutput, rownames(deseqoutput) %in% gene_list)
+
+# plot it
+library(ggplot2)
+
+pdf(paste0(subDir,"/Plots/volcano.pdf"), width = 7, height = 5, family="ArialMT")  # Specify desired width and height
+
+ggplot(deseqoutput, aes(x = log2FC_clip, y = neglog10_padj)) +
+  geom_point(aes(color = keyvals), size = 2, alpha=0.5) +
+  scale_color_identity() +  # uses the colors directly from keyvals
+  geom_text_repel(data = label_data,
+                  aes(label = rownames(label_data)),
+                  size = 4,
+                  max.overlaps = 10,
+                  box.padding = 0.3,       # increase label box size
+                  point.padding = 0.4,     # increase spacing between point and label
+                  segment.color = 'grey50',
+                  nudge_y = 0.5,           # move labels upward
+                  force = 2) +                # stronger repulsion force
+labs(
+  #title = paste0(group1, " vs. ", group2),
+  subtitle = "",  # italic("") is effectively blank
+  caption = "",
+  x = "Log2(Fold Change)",
+  y = expression(-Log[10] ~ italic("Adj. P value"))
+) +
+  geom_point(data = label_data, color = "black", size = 2) +
+  
+  coord_cartesian(xlim = c(-5, 5), ylim = c(0, 20)) +
+  scale_x_continuous(breaks = seq(-5, 5, 1)) +
+  theme_classic() +
+  theme(legend.position = "bottom")
+
+
+dev.off()
+# ggsave(paste0(subDir,"/Plots/",group1,"_vs_",group2,"_pretty_volcano.png"),
+#        units ="in",
+#        width = 8,
+#        height = 6)
+
+summary(res)
+
+```
+
+## Main principal component analysis figure (PCA)
+
+```{r pretty_pca}
+##### PCA PLOT
+
+pdf(paste0(subDir,"/Plots/pca.pdf"), width = 4.5, height = 2.5, family="ArialMT")  # Specify desired width and height
+
+ggplot(pcaData,aes(x=PC1, y=PC2, color = Population, shape=Origin)) +
+  geom_point(size=3) + 
+  theme_classic() +
+  scale_color_manual(values = genotype_colors) +
+stat_ellipse(aes(group = Origin), colour = "black")+                 
+  xlab(paste0("PC1 (",pc1var,"% variance)")) +
+  ylab(paste0("PC2 (",pc2var,"% variance)")) +
+  theme(panel.spacing = unit(0, "lines"),
+        strip.background = element_blank(),
+        text = element_text(color = "black",size = 10),
+        legend.key.height = unit(0.15, 'in'))+ 
+  guides(color = guide_legend(override.aes=list(shape = c(rep(16,3),rep(17,7)))))  # Customize shape of color legend
+
+
+dev.off()
+
+
+```
+
+## MSDIN expression vs mapping rate
+
+```{r mapping_vs_counts, eval=FALSE}
+# finally: also plot mapping rate for samples vs. counts for leaderless
+dat <- read.csv(paste0(subDir,"/NormCount-Graphs/Data/MLGFLVLP.csv"))
+colnames(dat)[1] <- "File_prefix"
+# reread metadata
+metadata <- read.csv(paste0(subDir,"/metadata_plus_mapping.csv"))
+
+mini_meta <- metadata[,c("File_prefix","perc_mapping")]
+mini_meta2 <- metadata[,c("Sample_ID","perc_mapping")]
+
+# merge
+dat2 <- merge(dat,mini_meta,by="File_prefix",all.x=TRUE)
+
+dat2$Origin <- factor(dat2$Origin, levels = c("CA",
+                                                    "EU"))
+
+dat2$Population <- factor(dat2$Population, levels = c("Drake",
+                                                            "Pet",
+                                                            "Picnic",
+                                                            "Aso",
+                                                            "Champ",
+                                                            "Doc",
+                                                            "Gron",
+                                                            "Lamp",
+                                                            "Quill",
+                                                            "Tisza"))
+
+
+library(ggplot2)
+
+# Fit the linear model
+# for all points:
+lm_model <- lm(count ~ perc_mapping, data = dat2)
+
+# based on origin:
+ca <- subset(dat2,Origin == "CA")
+eu <- subset(dat2,Origin == "EU")
+
+lm_model_ca <- lm(count ~ perc_mapping, data = ca)
+lm_model_eu <- lm(count ~ perc_mapping, data = eu)
+
+eqn_ca <- substitute(italic(y) == a + b %.% italic(x) * "," ~~ italic(R)^2 ~ "=" ~ r2, 
+                  list(a = as.numeric(format(coef(lm_model_ca)[1], digits = 3)),
+                       b = as.numeric(format(coef(lm_model_ca)[2], digits = 3)),
+                       r2 = format(summary(lm_model_ca)$r.squared, digits = 3)))
+
+eqn_eu <- substitute(italic(y) == a + b %.% italic(x) * "," ~~ italic(R)^2 ~ "=" ~ r2, 
+                  list(a = as.numeric(format(coef(lm_model_eu)[1], digits = 3)),
+                       b = as.numeric(format(coef(lm_model_eu)[2], digits = 3)),
+                       r2 = format(summary(lm_model_eu)$r.squared, digits = 3)))
+
+# Extract coefficients and R-squared
+eqn <- substitute(italic(y) == a + b %.% italic(x) * "," ~~ italic(R)^2 ~ "=" ~ r2, 
+                  list(a = as.numeric(format(coef(lm_model)[1], digits = 3)),
+                       b = as.numeric(format(coef(lm_model)[2], digits = 3)),
+                       r2 = format(summary(lm_model)$r.squared, digits = 3)))
+genotype_colors <- c("#723D00","#fb8500","#ffb703",
+                     "#023047","#0C556E","#177995","#219EBC","#5CB7CE","#96CFE0","#D1E8F2")
+
+ggplot(dat2, aes(x=perc_mapping,y=count,color=Population, shape=Origin)) +
+  geom_point(size=3) +
+  scale_color_manual(values = genotype_colors) +
+  geom_smooth(method = "lm", se = FALSE, color = "black") +  # Add linear regression line
+  annotate("text", x = min(dat2$perc_mapping), y = max(dat2$count), 
+           label = as.character(as.expression(eqn)), parse = TRUE, hjust = -0.3) +  # Add equation
+  theme_classic()
+
+ggsave("mapping_vs_leaderless_counts.png",
+       path = paste0(subDir,"/Plots/"),
+       units="in",
+       width = 6, height = 5)
+
+ggplot(dat2, aes(x=perc_mapping,y=count,color=Population, shape=Origin)) +
+  geom_point(size=3) +
+  scale_color_manual(values = genotype_colors) +
+  geom_smooth(method = "lm", se = FALSE, color = "black") +  # Add linear regression line
+  annotate("text", x = min(dat2$perc_mapping), y = max(dat2$count), 
+           label = as.character(as.expression(eqn_eu)), parse = TRUE, hjust = -0.3) +  # Add equation
+  theme_classic()
+ggsave("mapping_vs_leaderless_counts_EUlm.png",
+       path = paste0(subDir,"/Plots/"),
+       units="in",
+       width = 6, height = 5)
+
+
+ggplot(dat2, aes(x=perc_mapping,y=count,color=Population, shape=Origin)) +
+  geom_point(size=3) +
+  scale_color_manual(values = genotype_colors) +
+  geom_smooth(method = "lm", se = FALSE, color = "black") +  # Add linear regression line
+  annotate("text", x = min(dat2$perc_mapping), y = max(dat2$count), 
+           label = as.character(as.expression(eqn_ca)), parse = TRUE, hjust = -0.3) +  # Add equation
+  theme_classic()
+
+ggsave("mapping_vs_leaderless_counts_CAlm.png",
+       path = paste0(subDir,"/Plots/"),
+       units="in",
+       width = 6, height = 5)
+```
+
+Write function to access counts for each msdin and plot expr vs. maturity
+
+```{r maturity_vs_origin}
+# first plot maturity for CA vs EU samples
+mini_meta <- metadata[,c("File_prefix","Sample_ID","Origin","Population","Maturity")]
+
+# t test for maturity
+group1 <- "CA"
+group2 <- "EU"
+group1_data <- mini_meta[mini_meta$Origin == group1, "Maturity"]
+group2_data <- mini_meta[mini_meta$Origin == group2, "Maturity"]
+mean(group1_data)
+plotrix::std.error(group1_data)
+
+mean(group2_data)
+plotrix::std.error(group2_data)
+# Perform t-test
+test_result <- t.test(group1_data, group2_data)
+  
+  # Return the result (comparison name, p-value, and test statistics)
+  data.frame(
+    Comparison = paste(group1, "vs", group2),
+    p_value = test_result$p.value,
+    statistic = test_result$statistic,
+    conf_low = test_result$conf.int[1],
+    conf_high = test_result$conf.int[2]
+  )
+  
+  # extract text for plot
+  p_value = paste0("p = ",round(test_result$p.value,4))
+
+mini_meta$Origin <- factor(mini_meta$Origin, levels = c("CA",
+                                                "EU"))
+  
+mini_meta$Population <- factor(mini_meta$Population, levels = c("Drake",
+                                                        "Pet",
+                                                        "Picnic",
+                                                        "Aso",
+                                                        "Champ",
+                                                        "Doc",
+                                                        "Gron",
+                                                        "Lamp",
+                                                        "Quill",
+                                                        "Tisza"))
+
+genotype_colors <- c("#723D00","#fb8500","#ffb703",
+                       "#023047","#0C556E","#177995","#219EBC","#5CB7CE","#96CFE0","#D1E8F2")
+
+
+pdf(paste0(subDir,"/Plots/maturity.pdf"), width = 4, height = 4, family="ArialMT")
+
+ggplot(mini_meta, aes(x=Origin,y=Maturity,color=Population)) +
+  geom_point(aes(colour = Population), size = 4, position = position_jitter(w = 0.4, h = 0)) +
+  scale_color_manual(values = genotype_colors) +
+  # add mean line
+  stat_summary(fun= mean, fun.min=mean, fun.max=mean, geom="crossbar", width=0.5, linewidth=1,color="black") +
+  # add error bars
+  stat_summary(fun.data=mean_se, fun.args = list(mult=1), geom="errorbar", width=0.2, linewidth=1,color="black") +
+  annotate("text", x = "CA", y = 8, 
+           label = p_value, hjust = -0.3) +  # add p value
+  coord_cartesian(ylim = c(0, 8)) +
+  theme_classic()
+dev.off()
+
+
+
+
+```
+
+## MSDIN expression vs maturity of mushroom
+
+The maturity of each mushroom was scored prior to sampling:
+
+![A. phalloides maturity](/Users/songs005/Documents/Screenshot.png)
+
+``` {r plot_maturity_vs_expr}
+plot_maturity <- function (msdin) {
+  #msdin <- "MLGFLVLP"
+  dat <- read.csv(paste0(subDir,"/NormCount-Graphs/Data/",msdin,".csv"))
+  colnames(dat)[1] <- "File_prefix"
+  mini_meta <- metadata[,c("File_prefix","Maturity")]
+  mini_meta2 <- metadata[,c("Sample_ID","Maturity")]
+  
+  # merge
+  dat2 <- merge(dat,mini_meta,by="File_prefix",all.x=TRUE)
+  
+  dat2$Origin <- factor(dat2$Origin, levels = c("CA",
+                                                "EU"))
+  
+  dat2$Population <- factor(dat2$Population, levels = c("Drake",
+                                                        "Pet",
+                                                        "Picnic",
+                                                        "Aso",
+                                                        "Champ",
+                                                        "Doc",
+                                                        "Gron",
+                                                        "Lamp",
+                                                        "Quill",
+                                                        "Tisza"))
+  
+  
+  library(ggplot2)
+
+  
+  # Fit the linear model
+  # for all points:
+  lm_model <- lm(count ~ Maturity, data = dat2)
+  
+  # based on origin:
+  ca <- subset(dat2,Origin == "CA")
+  eu <- subset(dat2,Origin == "EU")
+  
+  # calculate p value with spearman ranked correlation
+  corr_ca <- cor.test(x=ca$Maturity, y=ca$count, method = "kendall")
+  corr_ca
+  corr_ca2 <- corr_ca[["p.value"]]
+  
+  corr_eu <- cor.test(x=eu$Maturity, y=eu$count, method = "kendall")
+  corr_eu2 <- corr_eu[["p.value"]]
+  
+  # do linear regression
+  lm_model_ca <- lm(count ~ Maturity, data = ca)
+  lm_model_eu <- lm(count ~ Maturity, data = eu)
+  
+  eqn_ca <- substitute(italic(y) == a + b %.% italic(x) * "," ~~ italic(R)^2 ~ "=" ~ r2, 
+                       list(a = as.numeric(format(coef(lm_model_ca)[1], digits = 3)),
+                            b = as.numeric(format(coef(lm_model_ca)[2], digits = 3)),
+                            r2 = format(summary(lm_model_ca)$r.squared, digits = 3)))
+  
+  eqn_eu <- substitute(italic(y) == a + b %.% italic(x) * "," ~~ italic(R)^2 ~ "=" ~ r2, 
+                       list(a = as.numeric(format(coef(lm_model_eu)[1], digits = 3)),
+                            b = as.numeric(format(coef(lm_model_eu)[2], digits = 3)),
+                            r2 = format(summary(lm_model_eu)$r.squared, digits = 3)))
+  
+  # Extract coefficients and R-squared
+  eqn <- substitute(italic(y) == a + b %.% italic(x) * "," ~~ italic(R)^2 ~ "=" ~ r2, 
+                    list(a = as.numeric(format(coef(lm_model)[1], digits = 3)),
+                         b = as.numeric(format(coef(lm_model)[2], digits = 3)),
+                         r2 = format(summary(lm_model)$r.squared, digits = 3)))
+  genotype_colors <- c("#723D00","#fb8500","#ffb703",
+                       "#023047","#0C556E","#177995","#219EBC","#5CB7CE","#96CFE0","#D1E8F2")
+  labeleqn <- paste(eqn_ca, eqn_eu, sep = "\n")
+  
+  ggplot(dat2, aes(x=Maturity,y=count,color=Population, shape=Origin)) +
+    geom_point(size=3) +
+    scale_color_manual(values = genotype_colors) +
+    #geom_smooth(method = "lm", se = FALSE, color = "black") +  # Add linear regression line
+    geom_smooth(
+    data = subset(dat2, Origin == "CA"),
+    method = "lm", se = FALSE, color = "#fb8500"
+  ) +
+
+  # One regression line for EU
+  geom_smooth(
+    data = subset(dat2, Origin == "EU"),
+    method = "lm", se = FALSE, color = "#0C556E"
+  ) +
+      annotate("text", 
+           x = min(dat2$Maturity), 
+           y = max(dat2$count), 
+           label = as.character(as.expression(eqn_ca)), 
+           parse = TRUE, 
+           hjust = 0,
+         color = "#fb8500") +
+  annotate("text", 
+           x = min(dat2$Maturity), 
+           y = max(dat2$count) * 0.9,  # slightly lower
+           label = as.character(as.expression(eqn_eu)), 
+           parse = TRUE, 
+           hjust = 0,
+         color = "#0C556E") +
+    theme_classic()
+  
+  ggsave(paste0("maturity_vs_",msdin,"_counts.png"),
+         path = paste0(subDir,"/Plots/"),
+         units="in",
+         width = 5, height = 4)
+  
+  # also get values for each plot and return that
+  ca <- c(a = as.numeric(format(coef(lm_model_ca)[1], digits = 3)),
+                            b = as.numeric(format(coef(lm_model_ca)[2], digits = 3)),
+                            r2 = format(summary(lm_model_ca)$r.squared, digits = 3))
+  eu <- c(a = as.numeric(format(coef(lm_model_eu)[1], digits = 3)),
+                            b = as.numeric(format(coef(lm_model_eu)[2], digits = 3)),
+                            r2 = format(summary(lm_model_eu)$r.squared, digits = 3))
+  output <- as.data.frame(rbind(ca,eu))
+  output$MSDIN <- msdin
+  output$Origin <- row.names(output)
+  output$pval <- c(corr_ca2,corr_eu2)
+  return(output)
+}
+
+# now run on each msdin and save the output
+# make sure to only run on list of msdins 
+# MSDINs, leadered and leaderless:
+list <- msdins$X4
+
+# first see which of these genes have any counts at all
+# get counts matrix for all genes
+counts <- counts(dds, normalized=TRUE)
+# find list of RiPPs also in count matrix
+list <- intersect(list, rownames(counts))
+
+results_df <- do.call(rbind, lapply(list, function(genename) {
+  plot_maturity(msdin = genename)
+}))
+
+rmarkdown::paged_table(results_df, options = NULL)
+
+write.csv(results_df,paste0(subDir,"/maturity_msdins.csv"))
+
+###########
+# also make nice leaderless plot
+msdin <- "MLGFLVLP"
+  dat <- read.csv(paste0(subDir,"/NormCount-Graphs/Data/",msdin,".csv"))
+  colnames(dat)[1] <- "File_prefix"
+  mini_meta <- metadata[,c("File_prefix","Maturity")]
+  mini_meta2 <- metadata[,c("Sample_ID","Maturity")]
+  
+  # merge
+  dat2 <- merge(dat,mini_meta,by="File_prefix",all.x=TRUE)
+  
+  dat2$Origin <- factor(dat2$Origin, levels = c("CA",
+                                                "EU"))
+  
+  dat2$Population <- factor(dat2$Population, levels = c("Drake",
+                                                        "Pet",
+                                                        "Picnic",
+                                                        "Aso",
+                                                        "Champ",
+                                                        "Doc",
+                                                        "Gron",
+                                                        "Lamp",
+                                                        "Quill",
+                                                        "Tisza"))
+  
+  
+  library(ggplot2)
+  
+  # Fit the linear model
+  # for all points:
+  lm_model <- lm(count ~ Maturity, data = dat2)
+  
+  # based on origin:
+  ca <- subset(dat2,Origin == "CA")
+  eu <- subset(dat2,Origin == "EU")
+  
+  lm_model_ca <- lm(count ~ Maturity, data = ca)
+  lm_model_eu <- lm(count ~ Maturity, data = eu)
+  
+  eqn_ca <- substitute(italic(y) == a + b %.% italic(x) * "," ~~ italic(R)^2 ~ "=" ~ r2, 
+                       list(a = as.numeric(format(coef(lm_model_ca)[1], digits = 3)),
+                            b = as.numeric(format(coef(lm_model_ca)[2], digits = 3)),
+                            r2 = format(summary(lm_model_ca)$r.squared, digits = 3)))
+  
+  eqn_eu <- substitute(italic(y) == a + b %.% italic(x) * "," ~~ italic(R)^2 ~ "=" ~ r2, 
+                       list(a = as.numeric(format(coef(lm_model_eu)[1], digits = 3)),
+                            b = as.numeric(format(coef(lm_model_eu)[2], digits = 3)),
+                            r2 = format(summary(lm_model_eu)$r.squared, digits = 3)))
+  
+  # Extract coefficients and R-squared
+  eqn <- substitute(italic(y) == a + b %.% italic(x) * "," ~~ italic(R)^2 ~ "=" ~ r2, 
+                    list(a = as.numeric(format(coef(lm_model)[1], digits = 3)),
+                         b = as.numeric(format(coef(lm_model)[2], digits = 3)),
+                         r2 = format(summary(lm_model)$r.squared, digits = 3)))
+  genotype_colors <- c("#723D00","#fb8500","#ffb703",
+                       "#023047","#0C556E","#177995","#219EBC","#5CB7CE","#96CFE0","#D1E8F2")
+  labeleqn <- paste(eqn_ca, eqn_eu, sep = "\n")
+  
+  
+pdf(paste0(subDir,"/Plots/maturity_leaderless.pdf"), width = 5, height = 4, family="ArialMT")
+  
+  ggplot(dat2, aes(x=Maturity,y=count,color=Population, shape=Origin)) +
+    geom_point(size=3) +
+    scale_color_manual(values = genotype_colors) +
+    #geom_smooth(method = "lm", se = FALSE, color = "black") +  # Add linear regression line
+    geom_smooth(
+    data = subset(dat2, Origin == "CA"),
+    method = "lm", se = FALSE, color = "#fb8500"
+  ) +
+
+  # One regression line for EU
+  geom_smooth(
+    data = subset(dat2, Origin == "EU"),
+    method = "lm", se = FALSE, color = "#0C556E"
+  ) +
+      annotate("text", 
+           x = min(dat2$Maturity), 
+           y = max(dat2$count), 
+           label = as.character(as.expression(eqn_ca)), 
+           parse = TRUE, 
+           hjust = 0,
+         color = "#fb8500") +
+  annotate("text", 
+           x = min(dat2$Maturity), 
+           y = max(dat2$count) * 0.9,  # slightly lower
+           label = as.character(as.expression(eqn_eu)), 
+           parse = TRUE, 
+           hjust = 0,
+         color = "#0C556E") +
+    theme_classic()
+  dev.off()
+```
+
+## PCA of MSDINs only
+
+```{r pca_msdins_only}
+# subset dds to only include msdins
+
+# generate dds object
+library(DESeq2)
+setClassUnion("ExpData", c("matrix", "SummarizedExperiment"))
+dds2 <- DESeqDataSetFromMatrix(countData = cts,
+                              colData = coldata,
+                              design = ~ Origin)
+
+
+# keep only the msdins
+list <- msdins$X4
+
+# first see which of these genes have any counts at all
+# Check which entries in 'list' are NOT in the rownames
+missing <- setdiff(list, rownames(dds2))
+missing
+
+valid_list <- intersect(list, rownames(dds2))
+# this should be all msdins
+valid_list
+dds2 <- dds2[valid_list, ]
+
+dds2 <- DESeq(dds2)
+
+vsd2 <- varianceStabilizingTransformation(dds2, blind=FALSE)
+
+# find distances between samples
+sampleDists <- dist(t(assay(vsd2)))
+
+# reformat distances
+sampleDistMatrix <- as.matrix(sampleDists)
+
+# make new data frame with only Population stage info
+#metadata <- readxl::read_xlsx(paste0(dir,"/metadata.xlsx"),sheet="metadata")
+
+#metadata <- metadata[!metadata$Sample_ID %in% c("Pet1-redo","Pet5"),]
+
+samples <- metadata$Sample_ID
+
+# make row and column names the same as sample IDs
+rownames(sampleDistMatrix) <- samples
+colnames(sampleDistMatrix) <- samples
+
+# generate some nice colors
+library(RColorBrewer)
+colors <- colorRampPalette( rev(brewer.pal(9, "Blues")) )(255)
+
+# plot it
+library(pheatmap)
+pheatmap(sampleDistMatrix,
+         clustering_distance_rows=sampleDists,
+         clustering_distance_cols=sampleDists,
+         col=colors)
+
+# next lets generate a PCA plot on variance stabilized data
+vsd_out <- assay(vsd2)
+
+# run PCA analysis
+pca <- prcomp(t(vsd_out))
+
+# plot scree
+library(factoextra)
+fviz_eig(pca)
+
+# Create data frame with metadata and PC3 and PC4 values for input to ggplot
+pcaData <- cbind(metadata[,c(2:5,8,13,15)], pca$x)
+
+# Define color palette for genotypes
+pcaData$Origin <- factor(pcaData$Origin, levels = c("CA",
+                                                    "EU"))
+# find percent variance for PC1 and PC2
+# summary of variance
+pcasummary <- summary(pca)
+pcasummary
+pc1var <- round(pcasummary$importance[2],digits = 4) * 100
+pc2var <- round(pcasummary$importance[5],digits = 4) * 100
+pc3var <- round(pcasummary$importance[8],digits = 4) * 100
+pc4var <- round(pcasummary$importance[11],digits = 4) * 100
+
+
+pcaData$Population <- factor(pcaData$Population, levels = c("Drake",
+                                                            "Pet",
+                                                            "Picnic",
+                                                            "Aso",
+                                                            "Champ",
+                                                            "Doc",
+                                                            "Gron",
+                                                            "Lamp",
+                                                            "Quill",
+                                                            "Tisza"))
+
+
+
+pdf(paste0(subDir,"/Plots/pca_msdins_only.pdf"), width = 4.5, height = 2.5, family="ArialMT")  # Specify desired width and height
+
+ggplot(pcaData,aes(x=PC1, y=PC2, color = Population, shape=Origin)) +
+  geom_point(size=3) + 
+  theme_classic() +
+  scale_color_manual(values = genotype_colors) +
+stat_ellipse(aes(group = Origin), colour = "black")+                 
+  xlab(paste0("PC1 (",pc1var,"% variance)")) +
+  ylab(paste0("PC2 (",pc2var,"% variance)")) +
+  theme(panel.spacing = unit(0, "lines"),
+        strip.background = element_blank(),
+        text = element_text(color = "black",size = 10),
+        legend.key.height = unit(0.15, 'in'))+ 
+  guides(color = guide_legend(override.aes=list(shape = c(rep(16,3),rep(17,7)))))  # Customize shape of color legend
+
+
+dev.off()
+```
+
+## PCA of all non-MSDIN transcripts
+```{r pca_no_msdins}
+# subset dds to exclude msdins
+# generate dds object
+library(DESeq2)
+dds2 <- DESeqDataSetFromMatrix(countData = cts,
+                              colData = coldata,
+                              design = ~ Origin)
+
+
+# exclude the msdins
+list <- msdins$X4
+
+valid_list <- !rownames(dds2) %in% list
+dds2 <- dds2[valid_list, ]
+
+dds2 <- DESeq(dds2)
+
+vsd2 <- varianceStabilizingTransformation(dds2, blind=FALSE)
+
+# find distances between samples
+sampleDists <- dist(t(assay(vsd2)))
+
+# reformat distances
+sampleDistMatrix <- as.matrix(sampleDists)
+
+# make new data frame with only Population stage info
+df <- as.data.frame(colData(dds2)[,c("Population")])
+colnames(df) <- c("Population")
+#samples <- colnames(assay(ntd))
+samples <- metadata$Sample_ID
+
+# make row and column names the same as sample IDs
+rownames(sampleDistMatrix) <- samples
+colnames(sampleDistMatrix) <- samples
+
+# generate some nice colors
+library(RColorBrewer)
+colors <- colorRampPalette( rev(brewer.pal(9, "Blues")) )(255)
+
+# plot it
+library(pheatmap)
+pheatmap(sampleDistMatrix,
+         clustering_distance_rows=sampleDists,
+         clustering_distance_cols=sampleDists,
+         col=colors)
+
+# next lets generate a PCA plot on variance stabilized data
+vsd_out <- assay(vsd2)
+
+# run PCA analysis
+pca <- prcomp(t(vsd_out))
+
+# plot scree
+library(factoextra)
+fviz_eig(pca)
+
+# Create data frame with metadata and PC3 and PC4 values for input to ggplot
+pcaData <- cbind(metadata[,c(2:5,8,13,15)], pca$x)
+
+# Define color palette for genotypes
+pcaData$Origin <- factor(pcaData$Origin, levels = c("CA",
+                                                    "EU"))
+# find percent variance for PC1 and PC2
+# summary of variance
+pcasummary <- summary(pca)
+pcasummary
+pc1var <- round(pcasummary$importance[2],digits = 4) * 100
+pc2var <- round(pcasummary$importance[5],digits = 4) * 100
+pc3var <- round(pcasummary$importance[8],digits = 4) * 100
+pc4var <- round(pcasummary$importance[11],digits = 4) * 100
+
+
+pcaData$Population <- factor(pcaData$Population, levels = c("Drake",
+                                                            "Pet",
+                                                            "Picnic",
+                                                            "Aso",
+                                                            "Champ",
+                                                            "Doc",
+                                                            "Gron",
+                                                            "Lamp",
+                                                            "Quill",
+                                                            "Tisza"))
+
+
+
+pdf(paste0(subDir,"/Plots/pca_no_msdins.pdf"), width = 4.5, height = 2.5, family="ArialMT")  # Specify desired width and height
+
+ggplot(pcaData,aes(x=PC1, y=PC2, color = Population, shape=Origin)) +
+  geom_point(size=3) + 
+  theme_classic() +
+  scale_color_manual(values = genotype_colors) +
+stat_ellipse(aes(group = Origin), colour = "black")+                 
+  xlab(paste0("PC1 (",pc1var,"% variance)")) +
+  ylab(paste0("PC2 (",pc2var,"% variance)")) +
+  theme(panel.spacing = unit(0, "lines"),
+        strip.background = element_blank(),
+        text = element_text(color = "black",size = 10),
+        legend.key.height = unit(0.15, 'in'))+ 
+  guides(color = guide_legend(override.aes=list(shape = c(rep(16,3),rep(17,7)))))  # Customize shape of color legend
+
+
+dev.off()
+```
+
+# Session info
+```{r session_info}
+sessionInfo()
+```
+
