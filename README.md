@@ -8,3 +8,4 @@ Contents:
 - Script 4 [BAM alignment of reads to a leaderless MSDIN gene](https://github.com/LiviaSongster/leaderless_Aphalloides/blob/main/Script4_leaderless_bam_alignment.md)
 - Genome annotation file of canonical and noncanonical MSDINs in A. phalloides reference genome 10511 [.bed](https://github.com/LiviaSongster/leaderless_Aphalloides/blob/main/cds_for_liv.bed)
 - Genome annotation file of canonical and noncanonical MSDINs in A. phalloides reference genome 10511 [.gff3](https://github.com/LiviaSongster/leaderless_Aphalloides/blob/main/aphal_msdins_only.gff3)
+- fasta files used for MSDIN phylogenies: [fasta files for the revision.zip](https://github.com/LiviaSongster/leaderless_Aphalloides/blob/main/fasta%20files%20for%20the%20revision.zip)
