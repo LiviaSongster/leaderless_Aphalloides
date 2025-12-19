@@ -1,11 +1,13 @@
-# RNA sequence analysis of leaderless MSDINs in A. phalloides.
-Code related to data analysis and figure generation is below. Hyperlinks will connect to .md markdown files that are rendered in Github. For proper rendering & easier reviewing on your own computer, I recommend you download the .html files locally and open them in your .html viewer/browser.
+# Leaderless MSDINs in A. phalloides.
+Github repository contents:
+- [Dataset S1](https://github.com/LiviaSongster/leaderless_Aphalloides/tree/main/Software%20S1): Scripts for MSDIN identification from Park et al. 2025; Script Author: Milton T. Drott 
+- [rnaseq_scripts](https://github.com/LiviaSongster/leaderless_Aphalloides/tree/main/rnaseq_scripts): Code related to RNA Seq data analysis and figure generation. Hyperlinks will connect to .md markdown files that are rendered in Github. For proper rendering & easier reviewing on your own computer, I recommend you download the [html](https://github.com/LiviaSongster/leaderless_Aphalloides/tree/main/rnaseq_scripts/html) files locally and open them in your .html viewer/browser.
+  Genome annotation file of canonical and noncanonical MSDINs in A. phalloides reference genome 10511 [.bed](https://github.com/LiviaSongster/leaderless_Aphalloides/blob/main/all_msdin_cds.bed))
+- Genome annotation file of canonical and noncanonical MSDINs in A. phalloides reference genome 10511 [.gff3](https://github.com/LiviaSongster/leaderless_Aphalloides/blob/main/aphal_msdin_annotations.gff3)
+- fasta files used for MSDIN phylogenies: [fasta_files.zip](https://github.com/LiviaSongster/leaderless_Aphalloides/blob/main/fasta_files.zip)
 
-Contents:
-- Script 1 [Add MSDINs to .gff3 gene annotation file](https://github.com/LiviaSongster/leaderless_Aphalloides/blob/main/Script1_gff.md)
-- Script 2 [Read mapping with Hisat2 and Featurecounts](https://github.com/LiviaSongster/leaderless_Aphalloides/blob/main/Script2_RNAseq_genome_mapping.md)
-- Script 3 [Differential expression analysis with DESeq2](https://github.com/LiviaSongster/leaderless_Aphalloides/blob/main/Script3_DESeq2.md)
-- Script 4 [BAM alignment of reads to a leaderless MSDIN gene](https://github.com/LiviaSongster/leaderless_Aphalloides/blob/main/Script4_leaderless_bam_alignment.md)
-- Genome annotation file of canonical and noncanonical MSDINs in A. phalloides reference genome 10511 [.bed](https://github.com/LiviaSongster/leaderless_Aphalloides/blob/main/cds_for_liv.bed)
-- Genome annotation file of canonical and noncanonical MSDINs in A. phalloides reference genome 10511 [.gff3](https://github.com/LiviaSongster/leaderless_Aphalloides/blob/main/aphal_msdins_only.gff3)
-- fasta files used for MSDIN phylogenies: [fasta files for the revision.zip](https://github.com/LiviaSongster/leaderless_Aphalloides/blob/main/fasta%20files%20for%20the%20revision.zip)
+Detailed descriptions for [rnaseq_scripts](https://github.com/LiviaSongster/leaderless_Aphalloides/tree/main/rnaseq_scripts)
+- Script 1 [Add MSDINs to .gff3 gene annotation file](https://github.com/LiviaSongster/leaderless_Aphalloides/blob/main/rnaseq_scripts/Script1_gff.md)
+- Script 2 [Read mapping with Hisat2 and Featurecounts](https://github.com/LiviaSongster/leaderless_Aphalloides/blob/main/rnaseq_scripts/Script2_RNAseq_genome_mapping.md)
+- Script 3 [Differential expression analysis with DESeq2](https://github.com/LiviaSongster/leaderless_Aphalloides/blob/main/rnaseq_scripts/Script3_DESeq2.md)
+- Script 4 [BAM alignment of reads to a leaderless MSDIN gene](https://github.com/LiviaSongster/leaderless_Aphalloides/blob/main/rnaseq_scripts/Script4_leaderless_bam_alignment.md)
