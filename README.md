@@ -10,7 +10,7 @@
 Author: Milton T. Drott
 This directory contains MSDIN finding scripts from Park et al. 2025 (leaderless MSDINs) and Drott et al. 2023 (leadered MSDINs).
 - Please refer to the nested [README_new.txt](https://github.com/LiviaSongster/leaderless_Aphalloides/blob/main/Software%20S1/README_new.txt) for detailed information on how to use these scripts and example usage.
-- [leadered.zip](https://github.com/LiviaSongster/leaderless_Aphalloides/blob/main/Software%20S1/leadered.zip): These scripts were developed by Milton T. Drott for the manuscript entitled <i>[Pangenomics of the death cap mushroom Amanita phalloides, and of Agaricales, reveals dynamic evolution of toxin genes in an invasive range.]</i>(https://doi.org/10.1038/s41396-023-01432-x). Please cite accordingly if using this pipeline.
+- [leadered.zip](https://github.com/LiviaSongster/leaderless_Aphalloides/blob/main/Software%20S1/leadered.zip): These scripts were developed by Milton T. Drott for the manuscript entitled <i>[Pangenomics of the death cap mushroom Amanita phalloides, and of Agaricales, reveals dynamic evolution of toxin genes in an invasive range](https://doi.org/10.1038/s41396-023-01432-x)</i>. Please cite accordingly if using this pipeline.
 - [leaderless.zip](https://github.com/LiviaSongster/leaderless_Aphalloides/blob/main/Software%20S1/leaderless.zip): Scripts have been updated to accommodate leaderless MSDINs by Milton T. Drott for the manuscript entitled <i>[Leaderless RiPPs expand the chemical repertoire of the invasive death cap mushroom]</i>. Please cite accordingly if using the leaderless portion of the pipeline 
 
 ## Detailed descriptions for [rnaseq_scripts](https://github.com/LiviaSongster/leaderless_Aphalloides/tree/main/rnaseq_scripts)
