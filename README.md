@@ -1,5 +1,5 @@
 # Leaderless MSDINs in A. phalloides.
-Github repository contents:
+### Github repository contents:
 - [Dataset S1](https://github.com/LiviaSongster/leaderless_Aphalloides/tree/main/Software%20S1): Scripts for MSDIN identification from Park et al. 2025 (leaderless MSDINs) and Drott et al. 2023 (leadered MSDINs); Author: Milton T. Drott 
 - [rnaseq_scripts](https://github.com/LiviaSongster/leaderless_Aphalloides/tree/main/rnaseq_scripts): Code related to RNA Seq data analysis and figure generation; Author: Livia D. S. Oster
 - [all_msdin_cds.bed](https://github.com/LiviaSongster/leaderless_Aphalloides/blob/main/all_msdin_cds.bed)): Genome annotation file of canonical and noncanonical MSDINs in A. phalloides reference genome 10511
